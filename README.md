@@ -248,6 +248,16 @@ GET    /api/questions/faq                # Public FAQ
 
 ## Development Workflow
 
+### Branching Strategy
+
+`main` is the source of truth and is kept stable (shippable) at all times.
+
+- **Never** commit directly to `main`.
+- All work happens on short-lived **feature branches** created from `main`.
+- Each branch fixes `main` back to a single Pull Request; release happens from `main`.
+- **Branch lifecycle:** create from `main` → work + commit → open PR → review (≥1 approval, and the module owner must approve changes to their module) → CI green → squash-merge → **delete the branch**.
+- Full review rules: see [CONTRIBUTION.md](CONTRIBUTION.md).
+
 ### Branch Naming
 ```
 <type>/<module>-<short-description>
@@ -274,6 +284,25 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 - Each module owns its tables → creates its own Flyway migration files
 - Naming: `V<version>__<module>_<description>.sql`
 - Example: `V2__catalog_create_frame_table.sql`
+
+---
+
+## Repository Structure
+
+```
+my-opty/
+├── backend/         # Spring Boot API (Java 26, Maven Wrapper)
+│   ├── compose.yaml # Local MySQL via Docker Compose
+│   ├── src/         # Java code + Flyway migrations
+│   └── pom.xml
+├── frontend/        # Next.js 16 web app (TypeScript, Tailwind CSS)
+│   └── app/         # Next.js app router pages
+├── database/        # DB-wide artifacts (ERD sources, data dictionary, migration notes)
+├── docs/            # Project documentation (deployment plan, API specs)
+├── items.json       # Epic/user-story board export (GitHub Projects)
+├── CONTRIBUTION.md  # Contribution, branch & PR conventions
+└── README.md        # Project plan, epics, user stories, diagrams
+```
 
 ---
 
