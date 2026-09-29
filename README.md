@@ -97,6 +97,8 @@ PUT    /api/orders/{id}/receive-date       # Set or withdraw the estimate, body:
 PUT    /api/orders/{id}/processing         # Client: now in the lab
 PUT    /api/orders/{id}/ready              # Client: ready to collect
 PUT    /api/orders/{id}/dispatched         # Client: handed over or sent
+GET    /api/notifications?customerId=       # What the shop told a customer, newest first
+GET    /api/notifications?orderId=          # One order's notification history
 POST   /api/discounts                      # Create discount (client)
 GET    /api/discounts                      # List (with active filter)
 PUT    /api/discounts/{id}                 # Update discount
@@ -123,11 +125,23 @@ Notes on the implemented endpoints:
   already in stock never gets processed); `DISPATCHED` and `REJECTED` are terminal.
   A generic "set status" endpoint is deliberately absent, so a client cannot name a
   state the workflow has not reached.
+- Every status change writes a notification recording the move, and the customer
+  is told through a pluggable `NotificationSender`. The only implementation logs it,
+  because sending mail needs a provider the shared module has not got yet; a real
+  transport replaces the log one by declaring its own bean. The message is stored
+  as it was written, so rewording the templates never changes what past
+  notifications claim was said.
+- `GET /api/notifications` needs `customerId` or `orderId`, and `orderId` wins if
+  both are sent. It returns at most 100 rows, newest first.
 - **These review and approval endpoints are not yet authenticated.** The module has
   no authentication or roles yet, so anyone who can reach the API can approve or
   reject production work. Auth belongs to the shared module; see CONTRIBUTION.md.
+- **`GET /api/notifications` is the sharpest edge of that.** Without auth there is
+  no way to tell who is asking, so supplying any `customerId` returns that
+  customer's order history to anyone who asks. Requiring a filter stops the
+  unbounded read but is not a substitute for authentication.
 
-**Database Tables:** `prescription`, `progressive_order`, `discount`, `stock_update`
+**Database Tables:** `prescription`, `progressive_order`, `order_notification`, `discount`, `stock_update`
 
 ---
 
