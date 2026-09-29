@@ -42,4 +42,28 @@ public class Todo {
     protected void onUpdate() {
         updatedAt = LocalDateTime.now();
     }
+
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private Status status;
+
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private Priority priority;
+
+
+    public enum Status {
+        PENDING,
+        IN_PROGRESS,
+        DONE
+    }
+
+
+    public enum Priority {
+        HIGH,
+        MEDIUM,
+        LOW
+    }
 }
