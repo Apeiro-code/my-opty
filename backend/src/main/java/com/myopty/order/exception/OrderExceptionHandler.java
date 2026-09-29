@@ -82,6 +82,39 @@ public class OrderExceptionHandler {
 	}
 
 	/**
+	 * The prescription exists and the review is a real transition, but it has
+	 * already been decided. 409 rather than 400 because no shape of request would
+	 * succeed here: reviewing is one-way by design.
+	 */
+	@ExceptionHandler(PrescriptionNotReviewableException.class)
+	ResponseEntity<ApiResponse<Void>> handlePrescriptionNotReviewable(PrescriptionNotReviewableException ex) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+			.body(ApiResponse.error("PRESCRIPTION_NOT_REVIEWABLE", ex.getMessage()));
+	}
+
+	/**
+	 * Same one-way reasoning as the prescription above, applied to the client's
+	 * approve or reject call on an order.
+	 */
+	@ExceptionHandler(OrderNotReviewableException.class)
+	ResponseEntity<ApiResponse<Void>> handleOrderNotReviewable(OrderNotReviewableException ex) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+			.body(ApiResponse.error("ORDER_NOT_REVIEWABLE", ex.getMessage()));
+	}
+
+	/**
+	 * Both rows are fine on their own; what conflicts is the pair, because an
+	 * unverified prescription must never reach production. The message names the
+	 * prescription and its real status so the client knows exactly what to go and
+	 * review first.
+	 */
+	@ExceptionHandler(PrescriptionNotVerifiedException.class)
+	ResponseEntity<ApiResponse<Void>> handlePrescriptionNotVerified(PrescriptionNotVerifiedException ex) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+			.body(ApiResponse.error("PRESCRIPTION_NOT_VERIFIED", ex.getMessage()));
+	}
+
+	/**
 	 * A body the JSON reader cannot turn into the request, which for this module
 	 * most often means an order type spelled wrongly. Reporting it as a bad
 	 * request is the point: without this the customer would see a 500 for a

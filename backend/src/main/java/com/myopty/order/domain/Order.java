@@ -37,6 +37,16 @@ public class Order {
 
 	private OrderStatus status = OrderStatus.PENDING_REVIEW;
 
+	/**
+	 * Why the shop rejected this order, set only alongside
+	 * {@link OrderStatus#REJECTED}.
+	 *
+	 * <p>Carried on the order rather than read back off the prescription because
+	 * the two decisions are independent: an order can be turned down for a stock
+	 * or pricing reason while its prescription stays verified.
+	 */
+	private String rejectionReason;
+
 	private LocalDate receiveDate;
 
 	private Instant createdAt;
@@ -52,6 +62,15 @@ public class Order {
 	 */
 	public boolean hasReceiveDate() {
 		return this.receiveDate != null;
+	}
+
+	/**
+	 * @return true once the shop has turned this order down and said why. Null on
+	 *         every order that is progressing normally, which is why the column is
+	 *         nullable rather than carrying an empty string.
+	 */
+	public boolean hasRejectionReason() {
+		return this.rejectionReason != null;
 	}
 
 	public Long getOrderId() {
@@ -108,6 +127,14 @@ public class Order {
 
 	public void setStatus(OrderStatus status) {
 		this.status = status;
+	}
+
+	public String getRejectionReason() {
+		return this.rejectionReason;
+	}
+
+	public void setRejectionReason(String rejectionReason) {
+		this.rejectionReason = rejectionReason;
 	}
 
 	public LocalDate getReceiveDate() {

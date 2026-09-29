@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -16,12 +17,14 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
 
 import com.myopty.order.domain.Prescription;
 import com.myopty.order.domain.PrescriptionStatus;
 import com.myopty.order.exception.DocumentStorageException;
 import com.myopty.order.exception.PrescriptionDocumentNotFoundException;
 import com.myopty.order.exception.PrescriptionNotFoundException;
+import com.myopty.order.exception.PrescriptionNotReviewableException;
 import com.myopty.order.exception.OrderExceptionHandler;
 import com.myopty.order.service.PrescriptionService;
 import com.myopty.order.service.PrescriptionService.PrescriptionDocumentContent;
@@ -199,6 +202,113 @@ class PrescriptionControllerTest {
 			.andExpect(jsonPath("$.error.code").value("DOCUMENT_STORAGE_UNAVAILABLE"));
 	}
 
+	@Test
+	void verifiesAPrescription() throws Exception {
+		when(this.service.verify(12L)).thenReturn(verifiedPrescription());
+
+		this.mockMvc.perform(put("/api/prescriptions/12/verify"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.status").value("VERIFIED"));
+	}
+
+	/**
+	 * Reviewing is one-way, so a client that has already decided gets a conflict
+	 * rather than silently changing the verdict.
+	 */
+	@Test
+	void refusesToVerifyAPrescriptionAlreadyReviewed() throws Exception {
+		when(this.service.verify(12L)).thenThrow(new PrescriptionNotReviewableException(12L, "REJECTED"));
+
+		this.mockMvc.perform(put("/api/prescriptions/12/verify"))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.error.code").value("PRESCRIPTION_NOT_REVIEWABLE"));
+	}
+
+	@Test
+	void reportsAnUnknownPrescriptionOnVerify() throws Exception {
+		when(this.service.verify(99L)).thenThrow(new PrescriptionNotFoundException(99L));
+
+		this.mockMvc.perform(put("/api/prescriptions/99/verify"))
+			.andExpect(status().isNotFound())
+			.andExpect(jsonPath("$.error.code").value("PRESCRIPTION_NOT_FOUND"));
+	}
+
+	@Test
+	void rejectsAPrescriptionWithAReason() throws Exception {
+		when(this.service.reject(12L, "left eye axis is missing")).thenReturn(rejectedPrescription());
+
+		this.mockMvc.perform(put("/api/prescriptions/12/reject").contentType(MediaType.APPLICATION_JSON)
+			.content("{\"reason\":\"left eye axis is missing\"}"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.status").value("REJECTED"))
+			.andExpect(jsonPath("$.data.rejectionReason").value("left eye axis is missing"));
+	}
+
+	/**
+	 * The reason is what the customer acts on, so a rejection without one is
+	 * refused rather than stored.
+	 */
+	@Test
+	void refusesARejectionWithNoReason() throws Exception {
+		this.mockMvc.perform(put("/api/prescriptions/12/reject").contentType(MediaType.APPLICATION_JSON)
+			.content("{\"reason\":\"\"}"))
+			.andExpect(status().isBadRequest())
+			.andExpect(jsonPath("$.success").value(false));
+	}
+
+	@Test
+	void refusesARejectionWithNoBody() throws Exception {
+		this.mockMvc.perform(put("/api/prescriptions/12/reject")).andExpect(status().isBadRequest());
+	}
+
+	@Test
+	void refusesToRejectAPrescriptionAlreadyReviewed() throws Exception {
+		when(this.service.reject(12L, "too late"))
+			.thenThrow(new PrescriptionNotReviewableException(12L, "VERIFIED"));
+
+		this.mockMvc.perform(put("/api/prescriptions/12/reject").contentType(MediaType.APPLICATION_JSON)
+			.content("{\"reason\":\"too late\"}"))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.error.code").value("PRESCRIPTION_NOT_REVIEWABLE"));
+	}
+
+	@Test
+	void queuesPrescriptionsByStatus() throws Exception {
+		when(this.service.listByStatus(PrescriptionStatus.PENDING_REVIEW)).thenReturn(List.of(prescription()));
+
+		this.mockMvc.perform(get("/api/prescriptions").param("status", "PENDING_REVIEW"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.length()").value(1))
+			.andExpect(jsonPath("$.data[0].id").value(12L));
+	}
+
+	@Test
+	void refusesAQueueWithoutAStatus() throws Exception {
+		this.mockMvc.perform(get("/api/prescriptions"))
+			.andExpect(status().isBadRequest())
+			.andExpect(jsonPath("$.error.code").value("MALFORMED_REQUEST"));
+	}
+
+	@Test
+	void refusesAStatusThatIsNotAPrescriptionStatus() throws Exception {
+		this.mockMvc.perform(get("/api/prescriptions").param("status", "MAYBE"))
+			.andExpect(status().isBadRequest())
+			.andExpect(jsonPath("$.error.code").value("MALFORMED_REQUEST"));
+	}
+
+	/**
+	 * Verifying does not leave a stale reason behind, so an unreviewed prescription
+	 * reports no rejection text at all.
+	 */
+	@Test
+	void omitsTheRejectionReasonUntilOneIsGiven() throws Exception {
+		when(this.service.getById(12L)).thenReturn(prescription());
+
+		this.mockMvc.perform(get("/api/prescriptions/12"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.rejectionReason").doesNotExist());
+	}
+
 	private static Prescription prescription() {
 		Prescription prescription = new Prescription();
 		prescription.setPrescriptionId(12L);
@@ -220,6 +330,19 @@ class PrescriptionControllerTest {
 		prescription.setDocumentUploadedAt(Instant.parse("2026-09-29T10:15:30Z"));
 		prescription.setCreatedAt(Instant.parse("2026-09-29T10:15:30Z"));
 		prescription.setUpdatedAt(Instant.parse("2026-09-29T10:15:30Z"));
+		return prescription;
+	}
+
+	private static Prescription verifiedPrescription() {
+		Prescription prescription = prescription();
+		prescription.setStatus(PrescriptionStatus.VERIFIED);
+		return prescription;
+	}
+
+	private static Prescription rejectedPrescription() {
+		Prescription prescription = prescription();
+		prescription.setStatus(PrescriptionStatus.REJECTED);
+		prescription.setRejectionReason("left eye axis is missing");
 		return prescription;
 	}
 

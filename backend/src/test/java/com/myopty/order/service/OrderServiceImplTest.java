@@ -7,17 +7,21 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.List;
 import java.util.Optional;
 
 import com.myopty.order.domain.Order;
 import com.myopty.order.domain.OrderStatus;
 import com.myopty.order.domain.OrderType;
 import com.myopty.order.domain.Prescription;
+import com.myopty.order.domain.PrescriptionStatus;
 import com.myopty.order.dto.OrderCreateRequest;
 import com.myopty.order.exception.InvalidOrderException;
 import com.myopty.order.exception.OrderAlreadyExistsException;
 import com.myopty.order.exception.OrderNotFoundException;
+import com.myopty.order.exception.OrderNotReviewableException;
 import com.myopty.order.exception.PrescriptionNotFoundException;
+import com.myopty.order.exception.PrescriptionNotVerifiedException;
 import com.myopty.order.repository.OrderRepository;
 import com.myopty.order.repository.PrescriptionRepository;
 
@@ -39,6 +43,15 @@ class OrderServiceImplTest {
 	private static final Long PRESCRIPTION_ID = 12L;
 
 	private static final Long CUSTOMER_ID = 7L;
+
+	private static final Long ORDER_ID = 3L;
+
+	/**
+	 * Length of {@code progressive_order.rejection_reason}. Spelled out here rather
+	 * than repeated as a literal, so a migration that widens the column is a
+	 * one-line change here too.
+	 */
+	private static final int MAX_REASON = 500;
 
 	@Mock
 	private OrderRepository repository;
@@ -284,16 +297,18 @@ class OrderServiceImplTest {
 		stored.setPrescriptionId(PRESCRIPTION_ID);
 		when(this.repository.findByPrescriptionId(PRESCRIPTION_ID)).thenReturn(Optional.of(stored));
 
-		assertThat(this.service.getByPrescriptionId(PRESCRIPTION_ID)).isSameAs(stored);
+		assertThat(this.service.getByPrescriptionId(PRESCRIPTION_ID)).containsExactly(stored);
 	}
 
+	/**
+	 * An unordered prescription is an empty result rather than a failure, so the
+	 * lookup shares the collection shape of the status queue.
+	 */
 	@Test
-	void reportsAPrescriptionThatHasNotBeenOrdered() {
+	void reportsAPrescriptionThatHasNotBeenOrderedAsAnEmptyList() {
 		when(this.repository.findByPrescriptionId(PRESCRIPTION_ID)).thenReturn(Optional.empty());
 
-		assertThatThrownBy(() -> this.service.getByPrescriptionId(PRESCRIPTION_ID))
-			.isInstanceOf(OrderNotFoundException.class)
-			.hasMessage("Prescription 12 has not been ordered yet");
+		assertThat(this.service.getByPrescriptionId(PRESCRIPTION_ID)).isEmpty();
 	}
 
 	/**
@@ -311,10 +326,161 @@ class OrderServiceImplTest {
 		verify(this.prescriptions, never()).save(any(Prescription.class));
 	}
 
+	/**
+	 * Approving is the one place an order's status is set to APPROVED, and it is
+	 * only reachable once the prescription behind it has been verified.
+	 */
+	@Test
+	void approvesAnOrderWhosePrescriptionIsVerified() {
+		stubOrder(pendingOrder());
+		stubPrescription(prescriptionWithStatus(PrescriptionStatus.VERIFIED));
+		stubSaveEchoingTheId();
+
+		Order approved = this.service.approve(ORDER_ID);
+
+		assertThat(approved.getStatus()).isEqualTo(OrderStatus.APPROVED);
+		assertThat(approved.hasRejectionReason()).isFalse();
+	}
+
+	/**
+	 * The rule that makes reviewing a prescription load-bearing: an unreviewed
+	 * prescription cannot be pushed into production by approving its order.
+	 */
+	@Test
+	void refusesToApproveWhileThePrescriptionIsStillPending() {
+		stubOrder(pendingOrder());
+		stubPrescription(prescriptionWithStatus(PrescriptionStatus.PENDING_REVIEW));
+
+		assertThatThrownBy(() -> this.service.approve(ORDER_ID))
+			.isInstanceOf(PrescriptionNotVerifiedException.class)
+			.hasMessageContaining("PENDING_REVIEW");
+
+		verify(this.repository, never()).save(any(Order.class));
+	}
+
+	@Test
+	void refusesToApproveWhenThePrescriptionWasRejected() {
+		stubOrder(pendingOrder());
+		stubPrescription(prescriptionWithStatus(PrescriptionStatus.REJECTED));
+
+		assertThatThrownBy(() -> this.service.approve(ORDER_ID))
+			.isInstanceOf(PrescriptionNotVerifiedException.class)
+			.hasMessageContaining("REJECTED");
+	}
+
+	@Test
+	void refusesToApproveAnOrderThatDoesNotExist() {
+		when(this.repository.findById(ORDER_ID)).thenReturn(Optional.empty());
+
+		assertThatThrownBy(() -> this.service.approve(ORDER_ID)).isInstanceOf(OrderNotFoundException.class);
+	}
+
+	/**
+	 * Reviewing is one-way, so an order that already carries a decision cannot be
+	 * decided again by resending the request.
+	 */
+	@Test
+	void refusesToApproveAnOrderAlreadyDecided() {
+		Order decided = pendingOrder();
+		decided.setStatus(OrderStatus.REJECTED);
+		stubOrder(decided);
+
+		assertThatThrownBy(() -> this.service.approve(ORDER_ID)).isInstanceOf(OrderNotReviewableException.class)
+			.hasMessageContaining("REJECTED");
+
+		verify(this.repository, never()).save(any(Order.class));
+	}
+
+	/**
+	 * Rejecting does not need a verified prescription: turning an order down is
+	 * exactly what a client does when the prescription is wrong, and the two
+	 * decisions are deliberately independent.
+	 */
+	@Test
+	void rejectsAnOrderWhosePrescriptionIsNotVerified() {
+		stubOrder(pendingOrder());
+		stubSaveEchoingTheId();
+
+		Order rejected = this.service.reject(ORDER_ID, "frame out of stock");
+
+		assertThat(rejected.getStatus()).isEqualTo(OrderStatus.REJECTED);
+		assertThat(rejected.getRejectionReason()).isEqualTo("frame out of stock");
+		verify(this.prescriptions, never()).findById(any());
+	}
+
+	@Test
+	void trimsTheRejectionReason() {
+		stubOrder(pendingOrder());
+		stubSaveEchoingTheId();
+
+		assertThat(this.service.reject(ORDER_ID, "  frame out of stock  ").getRejectionReason())
+			.isEqualTo("frame out of stock");
+	}
+
+	/**
+	 * A rejection nobody can act on is not a decision, so a blank reason is refused
+	 * rather than stored.
+	 */
+	@Test
+	void refusesARejectionWithNoReason() {
+		stubOrder(pendingOrder());
+
+		assertThatThrownBy(() -> this.service.reject(ORDER_ID, "   ")).isInstanceOf(InvalidOrderException.class)
+			.hasMessageContaining("reason");
+	}
+
+	@Test
+	void refusesARejectionReasonLongerThanTheColumn() {
+		stubOrder(pendingOrder());
+
+		assertThatThrownBy(() -> this.service.reject(ORDER_ID, "x".repeat(MAX_REASON + 1)))
+			.isInstanceOf(InvalidOrderException.class)
+			.extracting(ex -> ((InvalidOrderException) ex).getFieldErrors().get("reason"))
+			.isEqualTo("must be at most " + MAX_REASON + " characters");
+	}
+
+	@Test
+	void refusesToRejectAnOrderAlreadyDecided() {
+		Order decided = pendingOrder();
+		decided.setStatus(OrderStatus.APPROVED);
+		stubOrder(decided);
+
+		assertThatThrownBy(() -> this.service.reject(ORDER_ID, "too late"))
+			.isInstanceOf(OrderNotReviewableException.class);
+	}
+
+	/**
+	 * Approving writes only the order. Rewriting the prescription here would let a
+	 * client mark a prescription verified as a side effect of approving its order,
+	 * which would defeat the review entirely.
+	 */
+	@Test
+	void approvesWithoutTouchingThePrescription() {
+		stubOrder(pendingOrder());
+		stubPrescription(prescriptionWithStatus(PrescriptionStatus.VERIFIED));
+		stubSaveEchoingTheId();
+
+		this.service.approve(ORDER_ID);
+
+		verify(this.prescriptions, never()).save(any(Prescription.class));
+	}
+
+	@Test
+	void queuesOrdersByStatus() {
+		Order first = pendingOrder();
+		when(this.repository.findTop100ByStatusOrderByCreatedAtAscOrderIdAsc(OrderStatus.PENDING_REVIEW))
+			.thenReturn(List.of(first));
+
+		assertThat(this.service.listByStatus(OrderStatus.PENDING_REVIEW)).containsExactly(first);
+	}
+
+	private void stubOrder(Order order) {
+		when(this.repository.findById(ORDER_ID)).thenReturn(Optional.of(order));
+	}
+
 	private void stubPrescription(Prescription prescription) {
 		when(this.prescriptions.findById(PRESCRIPTION_ID)).thenReturn(Optional.of(prescription));
 	}
-
 	private void stubNoExistingOrder() {
 		when(this.repository.findByPrescriptionId(PRESCRIPTION_ID)).thenReturn(Optional.empty());
 	}
@@ -346,6 +512,21 @@ class OrderServiceImplTest {
 	private static Prescription progressivePrescription() {
 		Prescription prescription = plainPrescription();
 		prescription.setProgressive(true);
+		return prescription;
+	}
+
+	private static Order pendingOrder() {
+		Order order = new Order();
+		order.setOrderId(ORDER_ID);
+		order.setPrescriptionId(PRESCRIPTION_ID);
+		order.setOrderType(OrderType.PROGRESSIVE);
+		order.setStatus(OrderStatus.PENDING_REVIEW);
+		return order;
+	}
+
+	private static Prescription prescriptionWithStatus(PrescriptionStatus status) {
+		Prescription prescription = progressivePrescription();
+		prescription.setStatus(status);
 		return prescription;
 	}
 

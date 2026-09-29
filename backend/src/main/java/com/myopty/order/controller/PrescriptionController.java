@@ -1,11 +1,14 @@
 package com.myopty.order.controller;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import com.myopty.order.domain.Prescription;
+import com.myopty.order.domain.PrescriptionStatus;
 import com.myopty.order.dto.ApiResponse;
 import com.myopty.order.dto.PrescriptionCreateRequest;
 import com.myopty.order.dto.PrescriptionResponse;
+import com.myopty.order.dto.RejectionRequest;
 import com.myopty.order.mapper.PrescriptionMapper;
 import com.myopty.order.service.PrescriptionService;
 import com.myopty.order.service.PrescriptionService.PrescriptionDocumentContent;
@@ -26,7 +29,10 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
@@ -81,6 +87,63 @@ public class PrescriptionController {
 	public ApiResponse<PrescriptionResponse> getById(
 			@Parameter(description = "Prescription id", required = true) @PathVariable Long prescriptionId) {
 		return ApiResponse.ok(PrescriptionMapper.toResponse(this.service.getById(prescriptionId)));
+	}
+
+	@Operation(summary = "Search prescriptions by review status",
+			description = "The client's review queue. Oldest first, so the shop works prescriptions in the order they "
+					+ "arrived, and capped at 100 rows. The status is required: this endpoint exists to work through "
+					+ "a queue, and an unfiltered list of every prescription ever submitted is not a view anybody asks "
+					+ "for.")
+	@ApiResponses({
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+					description = "Matching prescriptions, oldest first, at most 100"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400",
+					description = "Status missing, or a value that is not a valid prescription status") })
+	@GetMapping
+	public ApiResponse<List<PrescriptionResponse>> search(
+			@Parameter(description = "Review status to queue by, e.g. PENDING_REVIEW", required = true) //
+			@RequestParam PrescriptionStatus status) {
+		return ApiResponse.ok(this.service.listByStatus(status).stream().map(PrescriptionMapper::toResponse).toList());
+	}
+
+	@Operation(summary = "Verify a prescription",
+			description = "Confirms the typed optical values match the uploaded document, which is what allows an "
+					+ "order built from this prescription to be approved. Changes the status and nothing else: the "
+					+ "values, the document and the customer are left exactly as submitted. One-way, so a prescription "
+					+ "that is already VERIFIED or REJECTED cannot be reviewed again.")
+	@ApiResponses({
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+					description = "Prescription verified"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404",
+					description = "Prescription not found"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409",
+					description = "The prescription has already been reviewed") })
+	@PutMapping("/{prescriptionId}/verify")
+	public ApiResponse<PrescriptionResponse> verify(
+			@Parameter(description = "Prescription id", required = true) @PathVariable Long prescriptionId) {
+		return ApiResponse.ok(PrescriptionMapper.toResponse(this.service.verify(prescriptionId)));
+	}
+
+	@Operation(summary = "Reject a prescription",
+			description = "Flags what is missing or wrong so the customer can correct it and resubmit. Independent of "
+					+ "any order built from the prescription: rejecting the prescription does not reject the order, "
+					+ "because the two are decided separately. Reviewing is one-way, so a mistaken rejection cannot be "
+					+ "undone by resending the request.")
+	@ApiResponses({
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+					description = "Prescription rejected"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400",
+					description = "The reason is missing or longer than 500 characters"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404",
+					description = "Prescription not found"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409",
+					description = "The prescription has already been reviewed") })
+	@PutMapping("/{prescriptionId}/reject")
+	public ApiResponse<PrescriptionResponse> reject(
+			@Parameter(description = "Prescription id", required = true) @PathVariable Long prescriptionId,
+			@Parameter(description = "What is missing or wrong", required = true) //
+			@Valid @RequestBody RejectionRequest request) {
+		return ApiResponse.ok(PrescriptionMapper.toResponse(this.service.reject(prescriptionId, request.reason())));
 	}
 
 	@Operation(summary = "Download the uploaded prescription document",

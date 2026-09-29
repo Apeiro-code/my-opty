@@ -6,6 +6,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -19,6 +20,7 @@ import com.myopty.order.exception.DocumentStorageException;
 import com.myopty.order.exception.InvalidPrescriptionException;
 import com.myopty.order.exception.PrescriptionDocumentNotFoundException;
 import com.myopty.order.exception.PrescriptionNotFoundException;
+import com.myopty.order.exception.PrescriptionNotReviewableException;
 import com.myopty.order.repository.PrescriptionRepository;
 import com.myopty.order.service.storage.DocumentStorage;
 
@@ -33,12 +35,25 @@ import org.springframework.web.multipart.MultipartFile;
  * stored first and the row is written second. If the write fails the stored object
  * is removed, so a failed submission leaves nothing behind and the customer can
  * simply try again.
+ *
+ * <p>Reviewing a prescription changes the status and nothing else. The optical
+ * values, the document and everything the customer submitted are left exactly as
+ * they arrived, so a reviewer can correct the verdict but can never quietly
+ * rewrite what was ordered against.
  */
 @Service
 @Transactional
 public class PrescriptionServiceImpl implements PrescriptionService {
 
 	private static final DateTimeFormatter KEY_DATE = DateTimeFormatter.ofPattern("yyyy/MM").withZone(ZoneOffset.UTC);
+
+	/**
+	 * Length of {@code prescription.rejection_reason} from
+	 * {@code V3__order_create_prescription_table.sql}, matched by
+	 * {@code progressive_order.rejection_reason} in V9 so both tables take the same
+	 * amount of text.
+	 */
+	private static final int MAX_REJECTION_REASON = 500;
 
 	private static final Map<String, String> EXTENSION_BY_CONTENT_TYPE = Map.of("image/jpeg", ".jpg", "image/png", ".png",
 			"image/webp", ".webp", "image/heic", ".heic", "application/pdf", ".pdf");
@@ -95,8 +110,75 @@ public class PrescriptionServiceImpl implements PrescriptionService {
 				content.stream());
 	}
 
-	private PrescriptionDocument storeDocument(String objectKey, MultipartFile document, String contentType) {
-		try (var in = document.getInputStream()) {
+	@Override
+	public Prescription verify(Long prescriptionId) {
+		Prescription prescription = awaitingReview(prescriptionId);
+		prescription.setStatus(PrescriptionStatus.VERIFIED);
+		// Clearing the reason keeps a row from carrying a rejection explanation
+		// alongside a verification. Nothing sets one today, so this is a no-op in
+		// practice, and it means a later story that allows re-reviewing starts from
+		// a clean state instead of inheriting stale text.
+		prescription.setRejectionReason(null);
+		return this.repository.save(prescription);
+	}
+
+	@Override
+	public Prescription reject(Long prescriptionId, String reason) {
+		Prescription prescription = awaitingReview(prescriptionId);
+		prescription.setStatus(PrescriptionStatus.REJECTED);
+		prescription.setRejectionReason(validateRejectionReason(reason));
+		return this.repository.save(prescription);
+	}
+
+	@Override
+	@Transactional(readOnly = true)
+	public List<Prescription> listByStatus(PrescriptionStatus status) {
+		return this.repository.findTop100ByStatusOrderByCreatedAtAscPrescriptionIdAsc(status);
+	}
+
+	/**
+	 * Loads a prescription the client is allowed to decide on, and refuses one that
+	 * has already been decided.
+	 *
+	 * <p>Shared by verify and reject so the two cannot drift apart, and a 409 rather
+	 * than a 400 because the request was well formed: it simply no longer applies
+	 * to this prescription.
+	 */
+	private Prescription awaitingReview(Long prescriptionId) {
+		Prescription prescription = getById(prescriptionId);
+		if (prescription.getStatus() != PrescriptionStatus.PENDING_REVIEW) {
+			throw new PrescriptionNotReviewableException(prescriptionId, nameOf(prescription.getStatus()));
+		}
+		return prescription;
+	}
+
+	/**
+	 * The column allows 500 characters, and the check lives here as well as on the
+	 * request so a reason arriving from anywhere else is held to the same rule. A
+	 * rejection with no explanation is not something the person told about it can
+	 * act on, and a customer cannot fix what is never spelled out.
+	 */
+	private static String validateRejectionReason(String reason) {
+		String trimmed = reason == null ? "" : reason.trim();
+		if (trimmed.isEmpty()) {
+			throw new InvalidPrescriptionException("A rejection needs a reason", Map.of("reason", "is required"));
+		}
+		if (trimmed.length() > MAX_REJECTION_REASON) {
+			throw new InvalidPrescriptionException("A rejection reason is too long",
+					Map.of("reason", "must be at most " + MAX_REJECTION_REASON + " characters"));
+		}
+		return trimmed;
+	}
+
+	/**
+	 * A row read back before it was written can still have a null enum, and this
+	 * message is shown to the client, so it must never read as "null".
+	 */
+	private static String nameOf(Enum<?> value) {
+		return value == null ? "in an unknown state" : value.name();
+	}
+
+	private PrescriptionDocument storeDocument(String objectKey, MultipartFile document, String contentType) {		try (var in = document.getInputStream()) {
 			return this.storage.store(objectKey, in, document.getSize(), sanitiseFilename(document.getOriginalFilename()),
 					contentType);
 		}
