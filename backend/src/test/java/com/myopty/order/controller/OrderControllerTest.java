@@ -1,14 +1,18 @@
 package com.myopty.order.controller;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Map;
 
 import com.myopty.order.domain.Order;
@@ -18,7 +22,9 @@ import com.myopty.order.exception.InvalidOrderException;
 import com.myopty.order.exception.OrderAlreadyExistsException;
 import com.myopty.order.exception.OrderExceptionHandler;
 import com.myopty.order.exception.OrderNotFoundException;
+import com.myopty.order.exception.OrderNotReviewableException;
 import com.myopty.order.exception.PrescriptionNotFoundException;
+import com.myopty.order.exception.PrescriptionNotVerifiedException;
 import com.myopty.order.service.OrderService;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -214,34 +220,161 @@ class OrderControllerTest {
 
 	/**
 	 * The other direction of the link, so a customer holding a prescription can
-	 * find the order made from it.
+	 * find the order made from it. An array rather than a bare object so this
+	 * endpoint shares one shape with the status queue.
 	 */
 	@Test
 	void findsTheOrderBuiltFromAPrescription() throws Exception {
-		when(this.service.getByPrescriptionId(12L)).thenReturn(order());
+		when(this.service.getByPrescriptionId(12L)).thenReturn(List.of(order()));
 
 		this.mockMvc.perform(get("/api/orders").param("prescriptionId", "12"))
 			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.data.prescriptionId").value(12L));
+			.andExpect(jsonPath("$.data.length()").value(1))
+			.andExpect(jsonPath("$.data[0].prescriptionId").value(12L));
 	}
 
+	/**
+	 * A prescription that was never ordered is an empty result, not a 404: the
+	 * filter is a query and the honest answer is "none", which keeps every filter on
+	 * this endpoint returning the same array.
+	 */
 	@Test
-	void reportsAPrescriptionThatHasNotBeenOrdered() throws Exception {
-		when(this.service.getByPrescriptionId(12L))
-			.thenThrow(new OrderNotFoundException("Prescription 12 has not been ordered yet"));
+	void reportsAPrescriptionThatHasNotBeenOrderedAsAnEmptyList() throws Exception {
+		when(this.service.getByPrescriptionId(12L)).thenReturn(List.of());
 
 		this.mockMvc.perform(get("/api/orders").param("prescriptionId", "12"))
-			.andExpect(status().isNotFound())
-			.andExpect(jsonPath("$.error.code").value("ORDER_NOT_FOUND"))
-			.andExpect(jsonPath("$.error.message").value("Prescription 12 has not been ordered yet"));
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.success").value(true))
+			.andExpect(jsonPath("$.data.length()").value(0));
 	}
 
 	@Test
-	void refusesALookupWithoutAPrescriptionId() throws Exception {
+	void queuesOrdersByStatus() throws Exception {
+		when(this.service.listByStatus(OrderStatus.PENDING_REVIEW)).thenReturn(List.of(order()));
+
+		this.mockMvc.perform(get("/api/orders").param("status", "PENDING_REVIEW"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.length()").value(1));
+	}
+
+	/**
+	 * Both filters narrow to rows matching each, rather than one silently winning.
+	 */
+	@Test
+	void narrowsWhenBothFiltersAreGiven() throws Exception {
+		when(this.service.getByPrescriptionId(12L)).thenReturn(List.of(order()));
+
+		this.mockMvc.perform(get("/api/orders").param("prescriptionId", "12").param("status", "PENDING_REVIEW"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.length()").value(1));
+
+		verify(this.service).getByPrescriptionId(12L);
+		verify(this.service, never()).listByStatus(any());
+	}
+
+	@Test
+	void dropsRowsThatDoNotMatchTheStatusWhenBothFiltersAreGiven() throws Exception {
+		when(this.service.getByPrescriptionId(12L)).thenReturn(List.of(approvedOrder()));
+
+		this.mockMvc.perform(get("/api/orders").param("prescriptionId", "12").param("status", "PENDING_REVIEW"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.length()").value(0));
+	}
+
+	/**
+	 * An unfiltered list would return every order ever placed, which is not a view
+	 * anybody asks for and would make the 100-row cap arbitrary.
+	 */
+	@Test
+	void refusesASearchWithNoFilter() throws Exception {
 		this.mockMvc.perform(get("/api/orders"))
 			.andExpect(status().isBadRequest())
-			.andExpect(jsonPath("$.success").value(false))
+			.andExpect(jsonPath("$.error.code").value("INVALID_ORDER"));
+	}
+
+	@Test
+	void refusesAStatusThatIsNotAnOrderStatus() throws Exception {
+		this.mockMvc.perform(get("/api/orders").param("status", "ON_HOLD"))
+			.andExpect(status().isBadRequest())
 			.andExpect(jsonPath("$.error.code").value("MALFORMED_REQUEST"));
+	}
+
+	@Test
+	void approvesAnOrder() throws Exception {
+		when(this.service.approve(3L)).thenReturn(approvedOrder());
+
+		this.mockMvc.perform(put("/api/orders/3/approve"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.status").value("APPROVED"));
+	}
+
+	@Test
+	void refusesToApproveAnOrderAlreadyDecided() throws Exception {
+		when(this.service.approve(3L)).thenThrow(new OrderNotReviewableException(3L, "APPROVED"));
+
+		this.mockMvc.perform(put("/api/orders/3/approve"))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.error.code").value("ORDER_NOT_REVIEWABLE"));
+	}
+
+	/**
+	 * The rule that makes reviewing a prescription matter: an order cannot be
+	 * approved until the prescription behind it has been verified.
+	 */
+	@Test
+	void refusesToApproveAnOrderWhosePrescriptionIsNotVerified() throws Exception {
+		when(this.service.approve(3L)).thenThrow(new PrescriptionNotVerifiedException(12L, "PENDING_REVIEW"));
+
+		this.mockMvc.perform(put("/api/orders/3/approve"))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.error.code").value("PRESCRIPTION_NOT_VERIFIED"));
+	}
+
+	@Test
+	void rejectsAnOrderWithAReason() throws Exception {
+		when(this.service.reject(3L, "frame out of stock")).thenReturn(rejectedOrder());
+
+		this.mockMvc.perform(put("/api/orders/3/reject").contentType(MediaType.APPLICATION_JSON)
+			.content("{\"reason\":\"frame out of stock\"}"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.status").value("REJECTED"))
+			.andExpect(jsonPath("$.data.rejectionReason").value("frame out of stock"));
+	}
+
+	@Test
+	void refusesARejectionWithNoReason() throws Exception {
+		this.mockMvc.perform(put("/api/orders/3/reject").contentType(MediaType.APPLICATION_JSON)
+			.content("{\"reason\":\"   \"}"))
+			.andExpect(status().isBadRequest())
+			.andExpect(jsonPath("$.success").value(false));
+	}
+
+	@Test
+	void refusesARejectionWithNoBody() throws Exception {
+		this.mockMvc.perform(put("/api/orders/3/reject")).andExpect(status().isBadRequest());
+	}
+
+	@Test
+	void refusesToRejectAnOrderAlreadyDecided() throws Exception {
+		when(this.service.reject(3L, "too late")).thenThrow(new OrderNotReviewableException(3L, "REJECTED"));
+
+		this.mockMvc.perform(put("/api/orders/3/reject").contentType(MediaType.APPLICATION_JSON)
+			.content("{\"reason\":\"too late\"}"))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.error.code").value("ORDER_NOT_REVIEWABLE"));
+	}
+
+	/**
+	 * The reason is only absent from the payload while the order is not rejected,
+	 * so a fresh order must not carry an empty string that reads as a reason.
+	 */
+	@Test
+	void omitsTheReasonOnAnOrderThatHasNotBeenRejected() throws Exception {
+		when(this.service.getById(3L)).thenReturn(order());
+
+		this.mockMvc.perform(get("/api/orders/3"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.rejectionReason").doesNotExist());
 	}
 
 	@Test
@@ -263,6 +396,23 @@ class OrderControllerTest {
 		order.setReceiveDate(LocalDate.of(2026, 10, 20));
 		order.setCreatedAt(Instant.parse("2026-09-29T10:15:30Z"));
 		order.setUpdatedAt(Instant.parse("2026-09-29T10:15:30Z"));
+		return order;
+	}
+
+	/**
+	 * The same order once it has been decided, for the cases that need a status
+	 * other than {@code PENDING_REVIEW}.
+	 */
+	private static Order approvedOrder() {
+		Order order = order();
+		order.setStatus(OrderStatus.APPROVED);
+		return order;
+	}
+
+	private static Order rejectedOrder() {
+		Order order = order();
+		order.setStatus(OrderStatus.REJECTED);
+		order.setRejectionReason("frame out of stock");
 		return order;
 	}
 

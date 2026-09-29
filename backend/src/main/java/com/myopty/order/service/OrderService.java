@@ -1,6 +1,9 @@
 package com.myopty.order.service;
 
+import java.util.List;
+
 import com.myopty.order.domain.Order;
+import com.myopty.order.domain.OrderStatus;
 import com.myopty.order.dto.OrderCreateRequest;
 
 /**
@@ -32,8 +35,48 @@ public interface OrderService {
 	 * Looks the order up from the prescription it was built from, which is how the
 	 * customer finds the order for a prescription they already hold.
 	 *
-	 * @throws com.myopty.order.exception.OrderNotFoundException if that prescription has no order
+	 * <p>A list rather than a single order so this shares the shape of
+	 * {@link #listByStatus}: {@code prescription_id} carries a unique key, so the
+	 * answer is zero or one row, and a prescription that was never ordered is an
+	 * empty list rather than a 404. That keeps {@code GET /api/orders} returning an
+	 * array for every filter it accepts, so a client can parse one shape.
 	 */
-	Order getByPrescriptionId(Long prescriptionId);
+	List<Order> getByPrescriptionId(Long prescriptionId);
+
+	/**
+	 * The client's approval queue. Oldest first, capped at 100 rows.
+	 *
+	 * @throws com.myopty.order.exception.OrderNotFoundException never
+	 */
+	List<Order> listByStatus(OrderStatus status);
+
+	/**
+	 * Accepts the order for production once the prescription behind it has been
+	 * verified.
+	 *
+	 * <p>The verification gate is the point of the method: an order can only be
+	 * approved from {@code PENDING_REVIEW} and only against a {@code VERIFIED}
+	 * prescription, so nothing unverified reaches the lab.
+	 *
+	 * @throws com.myopty.order.exception.OrderNotFoundException          if no such order exists
+	 * @throws com.myopty.order.exception.OrderNotReviewableException     if the order has already been decided
+	 * @throws com.myopty.order.exception.PrescriptionNotFoundException   if the linked prescription is gone
+	 * @throws com.myopty.order.exception.PrescriptionNotVerifiedException if that prescription is not VERIFIED
+	 */
+	Order approve(Long orderId);
+
+	/**
+	 * Turns the order down with a reason the client can act on.
+	 *
+	 * <p>Independent of the prescription: rejecting an order does not reject the
+	 * prescription it was built from, because the order can be turned down for a
+	 * reason that leaves the prescription perfectly valid.
+	 *
+	 * @param reason why the order is being rejected; must not be blank
+	 * @throws com.myopty.order.exception.OrderNotFoundException      if no such order exists
+	 * @throws com.myopty.order.exception.OrderNotReviewableException if the order has already been decided
+	 * @throws com.myopty.order.exception.InvalidOrderException       if the reason is blank or too long
+	 */
+	Order reject(Long orderId, String reason);
 
 }

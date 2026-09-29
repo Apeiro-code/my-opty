@@ -14,6 +14,7 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Optional;
 
 import com.myopty.order.domain.Prescription;
@@ -26,6 +27,7 @@ import com.myopty.order.exception.DocumentStorageException;
 import com.myopty.order.exception.InvalidPrescriptionDocumentException;
 import com.myopty.order.exception.InvalidPrescriptionException;
 import com.myopty.order.exception.PrescriptionNotFoundException;
+import com.myopty.order.exception.PrescriptionNotReviewableException;
 import com.myopty.order.repository.PrescriptionRepository;
 import com.myopty.order.service.storage.DocumentStorage;
 
@@ -262,6 +264,146 @@ class PrescriptionServiceImplTest {
 		assertThatThrownBy(() -> this.service.getDocument(7L))
 			.isInstanceOf(PrescriptionDocumentNotFoundException.class)
 			.hasMessageContaining("7");
+	}
+
+	/**
+	 * Verifying is what lets an order built from this prescription be approved, so
+	 * it is the status the review story exists to set.
+	 */
+	@Test
+	void verifiesAPrescriptionAwaitingReview() {
+		Prescription prescription = stubPrescription(PrescriptionStatus.PENDING_REVIEW);
+		stubSaveEchoingTheRow();
+
+		Prescription verified = this.service.verify(7L);
+
+		assertThat(verified.getStatus()).isEqualTo(PrescriptionStatus.VERIFIED);
+		assertThat(verified.getPrescriptionId()).isEqualTo(7L);
+		assertThat(verified.getRejectionReason()).isNull();
+	}
+
+	@Test
+	void rejectsAPrescriptionWithAReason() {
+		stubPrescription(PrescriptionStatus.PENDING_REVIEW);
+		stubSaveEchoingTheRow();
+
+		Prescription rejected = this.service.reject(7L, "left eye axis is missing");
+
+		assertThat(rejected.getStatus()).isEqualTo(PrescriptionStatus.REJECTED);
+		assertThat(rejected.getRejectionReason()).isEqualTo("left eye axis is missing");
+	}
+
+	/**
+	 * A rejection a customer cannot act on is not a useful outcome, so the reason
+	 * is required rather than stored empty.
+	 */
+	@Test
+	void refusesARejectionWithNoReason() {
+		stubPrescription(PrescriptionStatus.PENDING_REVIEW);
+
+		assertThatThrownBy(() -> this.service.reject(7L, "  ")).isInstanceOf(InvalidPrescriptionException.class)
+			.extracting(ex -> ((InvalidPrescriptionException) ex).getFieldErrors().get("reason"))
+			.isEqualTo("is required");
+
+		verify(this.repository, never()).save(any(Prescription.class));
+	}
+
+	@Test
+	void refusesARejectionReasonLongerThanTheColumn() {
+		stubPrescription(PrescriptionStatus.PENDING_REVIEW);
+
+		assertThatThrownBy(() -> this.service.reject(7L, "x".repeat(501)))
+			.isInstanceOf(InvalidPrescriptionException.class)
+			.extracting(ex -> ((InvalidPrescriptionException) ex).getFieldErrors().get("reason"))
+			.isEqualTo("must be at most 500 characters");
+	}
+
+	/**
+	 * Reviewing is one-way, so a decision cannot be changed by resending the
+	 * request. Both directions are covered because a client could otherwise undo a
+	 * rejection by calling verify.
+	 */
+	@Test
+	void refusesToReviewAPrescriptionAlreadyVerified() {
+		stubPrescription(PrescriptionStatus.VERIFIED);
+
+		assertThatThrownBy(() -> this.service.verify(7L)).isInstanceOf(PrescriptionNotReviewableException.class)
+			.hasMessageContaining("VERIFIED");
+
+		assertThatThrownBy(() -> this.service.reject(7L, "changed my mind"))
+			.isInstanceOf(PrescriptionNotReviewableException.class);
+
+		verify(this.repository, never()).save(any(Prescription.class));
+	}
+
+	@Test
+	void refusesToReviewAPrescriptionAlreadyRejected() {
+		stubPrescription(PrescriptionStatus.REJECTED);
+
+		assertThatThrownBy(() -> this.service.verify(7L)).isInstanceOf(PrescriptionNotReviewableException.class)
+			.hasMessageContaining("REJECTED");
+	}
+
+	@Test
+	void refusesToReviewAPrescriptionThatDoesNotExist() {
+		when(this.repository.findById(7L)).thenReturn(Optional.empty());
+
+		assertThatThrownBy(() -> this.service.verify(7L)).isInstanceOf(PrescriptionNotFoundException.class);
+	}
+
+	/**
+	 * The customer submitted the optical values and the document, and neither is
+	 * the reviewer's to rewrite. Only the status may change, so a client cannot
+	 * quietly alter what an order will be made to.
+	 */
+	@Test
+	void leavesTheSubmittedValuesUntouchedWhenReviewing() {
+		Prescription prescription = stubPrescription(PrescriptionStatus.PENDING_REVIEW);
+		stubSaveEchoingTheRow();
+		prescription.setNotes("Please use my usual frame");
+		prescription.setSphRight(decimal("-1.25"));
+		prescription.setCylRight(decimal("-0.50"));
+		prescription.setAxisRight(Integer.valueOf(180));
+		prescription.setAddRight(decimal("+2.00"));
+
+		Prescription reviewed = this.service.verify(7L);
+
+		assertThat(reviewed.rightEye().sphere()).isEqualByComparingTo("-1.25");
+		assertThat(reviewed.rightEye().cylinder()).isEqualByComparingTo("-0.50");
+		assertThat(reviewed.rightEye().axis()).isEqualTo(180);
+		assertThat(reviewed.rightEye().add()).isEqualByComparingTo("+2.00");
+		assertThat(reviewed.getNotes()).isEqualTo("Please use my usual frame");
+	}
+
+	@Test
+	void queuesPrescriptionsByStatus() {
+		Prescription first = new Prescription();
+		first.setPrescriptionId(7L);
+		when(this.repository.findTop100ByStatusOrderByCreatedAtAscPrescriptionIdAsc(PrescriptionStatus.PENDING_REVIEW))
+			.thenReturn(List.of(first));
+
+		assertThat(this.service.listByStatus(PrescriptionStatus.PENDING_REVIEW)).containsExactly(first);
+	}
+
+	/**
+	 * Stubs only the read, because most review tests must never reach a write.
+	 * Mockito runs in strict mode and fails a test for a stub nothing used, which
+	 * is exactly the signal wanted when a refusal wrongly starts saving.
+	 */
+	private Prescription stubPrescription(PrescriptionStatus status) {
+		Prescription prescription = new Prescription();
+		prescription.setPrescriptionId(7L);
+		prescription.setStatus(status);
+		when(this.repository.findById(7L)).thenReturn(Optional.of(prescription));
+		return prescription;
+	}
+
+	/**
+	 * Echoes the saved row back the way Spring Data JDBC does, so the test can
+	 * assert on what the review wrote.
+	 */
+	private void stubSaveEchoingTheRow() {
+		when(this.repository.save(any(Prescription.class))).thenAnswer(invocation -> invocation.getArgument(0));
 	}
 
 	private void stubStorageOnly() {
