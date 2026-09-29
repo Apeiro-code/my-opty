@@ -7,9 +7,15 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.time.Clock;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
+import com.myopty.order.config.LabProperties;
 import com.myopty.order.domain.Order;
 import com.myopty.order.domain.OrderStatus;
 import com.myopty.order.domain.OrderType;
@@ -18,6 +24,7 @@ import com.myopty.order.domain.PrescriptionStatus;
 import com.myopty.order.dto.OrderCreateRequest;
 import com.myopty.order.exception.InvalidOrderException;
 import com.myopty.order.exception.OrderAlreadyExistsException;
+import com.myopty.order.exception.OrderNotApprovedException;
 import com.myopty.order.exception.OrderNotFoundException;
 import com.myopty.order.exception.OrderNotReviewableException;
 import com.myopty.order.exception.PrescriptionNotFoundException;
@@ -59,11 +66,25 @@ class OrderServiceImplTest {
 	@Mock
 	private PrescriptionRepository prescriptions;
 
+	/**
+	 * Frozen so the quoted receive date is a value the test can state outright. With
+	 * the system clock the expectation would be right for every run except the hour
+	 * the date rolls over.
+	 */
+	private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-03-10T09:00:00Z"), ZoneOffset.UTC);
+
+	private static final int SINGLE_VISION_LEAD_DAYS = 7;
+
+	private static final int PROGRESSIVE_LEAD_DAYS = 14;
+
 	private OrderServiceImpl service;
 
 	@BeforeEach
 	void setUp() {
-		this.service = new OrderServiceImpl(this.repository, this.prescriptions);
+		this.service = new OrderServiceImpl(this.repository, this.prescriptions, new LabProperties(
+				Map.of(OrderType.SINGLE_VISION, SINGLE_VISION_LEAD_DAYS, OrderType.BIFOCAL, 10,
+						OrderType.PROGRESSIVE, PROGRESSIVE_LEAD_DAYS)),
+				CLOCK);
 	}
 
 	@Test
@@ -474,6 +495,154 @@ class OrderServiceImplTest {
 		assertThat(this.service.listByStatus(OrderStatus.PENDING_REVIEW)).containsExactly(first);
 	}
 
+	/**
+	 * The date the estimate produces is checked against the frozen clock rather than
+	 * "about two weeks out", so a change to the lead time or the rule shows up here
+	 * instead of being read as a slightly different number.
+	 */
+	@Test
+	void quotesAReceiveDateWhenTheOrderIsApproved() {
+		stubOrder(pendingOrder());
+		stubPrescription(prescriptionWithStatus(PrescriptionStatus.VERIFIED));
+		stubSaveEchoingTheId();
+
+		Order approved = this.service.approve(ORDER_ID);
+
+		// Clock is fixed at 2026-03-10 and a progressive order is quoted at 14 days.
+		assertThat(approved.getReceiveDate()).isEqualTo(LocalDate.of(2026, 3, 24));
+	}
+
+	/**
+	 * A progressive lens takes longer in the lab than a single-vision one, so the
+	 * lead time has to follow the order type rather than be one number for the shop.
+	 */
+	@Test
+	void quotesTheLeadTimeForTheOrderTypeThatWasOrdered() {
+		Order singleVision = pendingOrder();
+		singleVision.setOrderType(OrderType.SINGLE_VISION);
+		stubOrder(singleVision);
+		stubPrescription(prescriptionWithStatus(PrescriptionStatus.VERIFIED));
+		stubSaveEchoingTheId();
+
+		Order approved = this.service.approve(ORDER_ID);
+
+		assertThat(approved.getReceiveDate()).isEqualTo(LocalDate.of(2026, 3, 17));
+	}
+
+	/**
+	 * A date the shop set deliberately carries more information than a number
+	 * derived from a lead time, so approving must not overwrite it.
+	 */
+	@Test
+	void keepsAReceiveDateTheShopAlreadySet() {
+		Order quoted = pendingOrder();
+		quoted.setReceiveDate(LocalDate.of(2026, 4, 2));
+		stubOrder(quoted);
+		stubPrescription(prescriptionWithStatus(PrescriptionStatus.VERIFIED));
+		stubSaveEchoingTheId();
+
+		Order approved = this.service.approve(ORDER_ID);
+
+		assertThat(approved.getReceiveDate()).isEqualTo(LocalDate.of(2026, 4, 2));
+	}
+
+	/**
+	 * Turning an order down promises nothing, so a rejected order must not be given
+	 * a date the customer could read as a commitment.
+	 */
+	@Test
+	void quotesNoReceiveDateOnARejectedOrder() {
+		stubOrder(pendingOrder());
+		stubSaveEchoingTheId();
+
+		Order rejected = this.service.reject(ORDER_ID, "frame out of stock");
+
+		assertThat(rejected.hasReceiveDate()).isFalse();
+	}
+
+	@Test
+	void correctsTheQuotedReceiveDate() {
+		Order approved = approvedOrder();
+		stubOrder(approved);
+		stubSaveEchoingTheId();
+
+		Order updated = this.service.setReceiveDate(ORDER_ID, LocalDate.of(2026, 3, 30));
+
+		assertThat(updated.getReceiveDate()).isEqualTo(LocalDate.of(2026, 3, 30));
+	}
+
+	/**
+	 * Withdrawing an estimate is a different act from replacing one: a shop that
+	 * cannot stand behind its date clears it, and {@code null} says so explicitly.
+	 */
+	@Test
+	void withdrawsTheEstimateWhenGivenNoDate() {
+		Order approved = approvedOrder();
+		approved.setReceiveDate(LocalDate.of(2026, 3, 24));
+		stubOrder(approved);
+		stubSaveEchoingTheId();
+
+		Order updated = this.service.setReceiveDate(ORDER_ID, null);
+
+		assertThat(updated.hasReceiveDate()).isFalse();
+	}
+
+	/**
+	 * The frozen clock's date is the boundary, and quoting a customer an order that
+	 * was already due before it was approved is the mistake worth refusing.
+	 */
+	@Test
+	void refusesAReceiveDateInThePast() {
+		stubOrder(approvedOrder());
+
+		assertThatThrownBy(() -> this.service.setReceiveDate(ORDER_ID, LocalDate.of(2026, 3, 9)))
+			.isInstanceOf(InvalidOrderException.class)
+			.satisfies(thrown -> assertThat(((InvalidOrderException) thrown).getFieldErrors())
+				.containsEntry("receiveDate", "must be today or later"));
+
+		verify(this.repository, never()).save(any(Order.class));
+	}
+
+	@Test
+	void acceptsTodayAsTheReceiveDate() {
+		stubOrder(approvedOrder());
+		stubSaveEchoingTheId();
+
+		Order updated = this.service.setReceiveDate(ORDER_ID, LocalDate.of(2026, 3, 10));
+
+		assertThat(updated.getReceiveDate()).isEqualTo(LocalDate.of(2026, 3, 10));
+	}
+
+	@Test
+	void refusesAReceiveDateWhileTheOrderIsStillAwaitingReview() {
+		stubOrder(pendingOrder());
+
+		assertThatThrownBy(() -> this.service.setReceiveDate(ORDER_ID, LocalDate.of(2026, 3, 30)))
+			.isInstanceOf(OrderNotApprovedException.class)
+			.hasMessageContaining("PENDING_REVIEW");
+
+		verify(this.repository, never()).save(any(Order.class));
+	}
+
+	@Test
+	void refusesAReceiveDateOnARejectedOrder() {
+		Order rejected = approvedOrder();
+		rejected.setStatus(OrderStatus.REJECTED);
+		stubOrder(rejected);
+
+		assertThatThrownBy(() -> this.service.setReceiveDate(ORDER_ID, LocalDate.of(2026, 3, 30)))
+			.isInstanceOf(OrderNotApprovedException.class)
+			.hasMessageContaining("REJECTED");
+	}
+
+	@Test
+	void reportsAnUnknownOrderWhenSettingTheReceiveDate() {
+		when(this.repository.findById(ORDER_ID)).thenReturn(Optional.empty());
+
+		assertThatThrownBy(() -> this.service.setReceiveDate(ORDER_ID, LocalDate.of(2026, 3, 30)))
+			.isInstanceOf(OrderNotFoundException.class);
+	}
+
 	private void stubOrder(Order order) {
 		when(this.repository.findById(ORDER_ID)).thenReturn(Optional.of(order));
 	}
@@ -521,6 +690,12 @@ class OrderServiceImplTest {
 		order.setPrescriptionId(PRESCRIPTION_ID);
 		order.setOrderType(OrderType.PROGRESSIVE);
 		order.setStatus(OrderStatus.PENDING_REVIEW);
+		return order;
+	}
+
+	private static Order approvedOrder() {
+		Order order = pendingOrder();
+		order.setStatus(OrderStatus.APPROVED);
 		return order;
 	}
 
