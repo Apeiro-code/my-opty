@@ -213,6 +213,7 @@ V6__shared_create_app_user_table.sql
 V7__catalog_add_frame_image_url.sql
 V8__order_create_progressive_order_table.sql
 V9__order_add_order_rejection.sql
+V10__order_create_notification_table.sql
 ```
 
 ### Applied Version Map
@@ -229,9 +230,15 @@ allocations; this is which of them have actually landed.
 | V7 | catalog | `V7__catalog_add_frame_image_url.sql` | allocated, not applied |
 | V8 | order | `V8__order_create_progressive_order_table.sql` | applied (PR #3) |
 | V9 | order | `V9__order_add_order_rejection.sql` | applied (PR #4) |
+| V10 | order | `V10__order_create_notification_table.sql` | pending merge (PR #8) |
 
-**V10 is the next free version.** Order and catalog are the modules likely to
-claim it, so check team chat before taking it.
+**V11 is the next free version.** Catalog is the module most likely to claim it, so
+check team chat before taking it.
+
+V10 is listed as pending rather than applied on purpose: a migration that has been
+written, reviewed and merged has still not been run against a real database, and
+this table records what has actually happened to one. It also still has to be
+announced in team chat before it is applied anywhere, as the rule above requires.
 
 ### Migration Version Coordination
 - Use sequential versions across modules (check latest V number before creating)

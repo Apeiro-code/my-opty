@@ -1,20 +1,5 @@
 package com.myopty.order.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
-import java.time.Clock;
-import java.time.Instant;
-import java.time.LocalDate;
-import java.time.ZoneOffset;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-
 import com.myopty.order.config.LabProperties;
 import com.myopty.order.domain.Order;
 import com.myopty.order.domain.OrderStatus;
@@ -24,21 +9,40 @@ import com.myopty.order.domain.PrescriptionStatus;
 import com.myopty.order.dto.OrderCreateRequest;
 import com.myopty.order.exception.InvalidOrderException;
 import com.myopty.order.exception.OrderAlreadyExistsException;
-import com.myopty.order.exception.OrderNotApprovedException;
 import com.myopty.order.exception.OrderNotAdvancableException;
+import com.myopty.order.exception.OrderNotApprovedException;
 import com.myopty.order.exception.OrderNotFoundException;
 import com.myopty.order.exception.OrderNotReviewableException;
 import com.myopty.order.exception.PrescriptionNotFoundException;
 import com.myopty.order.exception.PrescriptionNotVerifiedException;
 import com.myopty.order.repository.OrderRepository;
 import com.myopty.order.repository.PrescriptionRepository;
-
+import java.time.Clock;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.DuplicateKeyException;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 /**
  * Order placement rules: the order type a customer may pick for a given
@@ -68,6 +72,16 @@ class OrderServiceImplTest {
 	private PrescriptionRepository prescriptions;
 
 	/**
+	 * The customer is told about the order as it moves, so every test that moves one
+	 * has to have somewhere for that to go. Mocked rather than real because what is
+	 * being tested here is the workflow, and the notifications it produces are
+	 * covered in {@code OrderNotificationServiceImplTest}. A test that is really
+	 * about a notification asserts on this mock instead.
+	 */
+	@Mock
+	private OrderNotificationService notifications;
+
+	/**
 	 * Frozen so the quoted receive date is a value the test can state outright. With
 	 * the system clock the expectation would be right for every run except the hour
 	 * the date rolls over.
@@ -85,7 +99,7 @@ class OrderServiceImplTest {
 		this.service = new OrderServiceImpl(this.repository, this.prescriptions, new LabProperties(
 				Map.of(OrderType.SINGLE_VISION, SINGLE_VISION_LEAD_DAYS, OrderType.BIFOCAL, 10,
 						OrderType.PROGRESSIVE, PROGRESSIVE_LEAD_DAYS)),
-				CLOCK);
+				CLOCK, this.notifications);
 	}
 
 	@Test
@@ -761,6 +775,99 @@ class OrderServiceImplTest {
 		this.service.markProcessing(ORDER_ID);
 
 		verify(this.prescriptions, never()).findById(any());
+	}
+
+	/**
+	 * The customer is owed an explanation every time their order moves. These five
+	 * are the only ways it moves, so they are the only five places a notification
+	 * can come from; if a sixth step is added without one, {@code everyStepThatMoves
+	 * AnOrderTellsTheCustomer} is what should fail.
+	 */
+	@ParameterizedTest
+	@CsvSource({ "APPROVED, PENDING_REVIEW, APPROVED", "REJECTED, PENDING_REVIEW, REJECTED", "PROCESSING, APPROVED, PROCESSING",
+			"READY, PROCESSING, READY", "DISPATCHED, READY, DISPATCHED" })
+	void everyStepThatMovesAnOrderTellsTheCustomer(String step, String from, String to) {
+		Order order = orderIn(OrderStatus.valueOf(from));
+		stubOrder(order);
+		stubSaveEchoingTheId();
+
+		switch (OrderStatus.valueOf(step)) {
+			// Only approval reads the prescription: the order was already accepted
+			// against a verified one by the time the workshop steps run.
+			case APPROVED -> {
+				stubPrescription(prescriptionWithStatus(PrescriptionStatus.VERIFIED));
+				this.service.approve(ORDER_ID);
+			}
+			case REJECTED -> this.service.reject(ORDER_ID, "out of stock");
+			case PROCESSING -> this.service.markProcessing(ORDER_ID);
+			case READY -> this.service.markReady(ORDER_ID);
+			case DISPATCHED -> this.service.markDispatched(ORDER_ID);
+			default -> throw new IllegalArgumentException("Not a step that moves an order: " + step);
+		}
+
+		verify(this.notifications).record(any(Order.class), eq(OrderStatus.valueOf(from)), eq(OrderStatus.valueOf(to)));
+	}
+
+	/**
+	 * Told after the order has been written, not before. A notification about a move
+	 * that then failed to save would tell the customer something untrue.
+	 */
+	@Test
+	void savesTheOrderBeforeTellingTheCustomer() {
+		stubOrder(pendingOrder());
+		stubPrescription(prescriptionWithStatus(PrescriptionStatus.VERIFIED));
+		stubSaveEchoingTheId();
+
+		this.service.approve(ORDER_ID);
+
+		InOrder inOrder = inOrder(this.repository, this.notifications);
+		inOrder.verify(this.repository).save(any(Order.class));
+		inOrder.verify(this.notifications).record(any(Order.class), any(OrderStatus.class), any(OrderStatus.class));
+	}
+
+	/**
+	 * The notification is told about the order as it now stands, so the ids it
+	 * carries are the ones the order has after the move rather than a separate
+	 * lookup the service could get wrong.
+	 */
+	@Test
+	void tellsTheCustomerAboutTheSavedOrder() {
+		stubOrder(pendingOrder());
+		stubPrescription(prescriptionWithStatus(PrescriptionStatus.VERIFIED));
+		stubSaveEchoingTheId();
+
+		Order approved = this.service.approve(ORDER_ID);
+
+		verify(this.notifications).record(eq(approved), eq(OrderStatus.PENDING_REVIEW), eq(OrderStatus.APPROVED));
+	}
+
+	/**
+	 * A refused move is not a move, so it is not news. A notification here would
+	 * tell the customer their order had changed when it had not.
+	 */
+	@Test
+	void doesNotTellTheCustomerAboutARefusedMove() {
+		stubOrder(orderIn(OrderStatus.REJECTED));
+
+		assertThatThrownBy(() -> this.service.markProcessing(ORDER_ID))
+			.isInstanceOf(OrderNotAdvancableException.class);
+
+		verifyNoInteractions(this.notifications);
+	}
+
+	/**
+	 * The order is saved first, and a notification that was written before the save
+	 * failed would be a promise the shop then withdrew.
+	 */
+	@Test
+	void doesNotTellTheCustomerWhenTheOrderCannotBeSaved() {
+		stubOrder(pendingOrder());
+		stubPrescription(prescriptionWithStatus(PrescriptionStatus.VERIFIED));
+		when(this.repository.save(any(Order.class))).thenThrow(new DataIntegrityViolationException("boom"));
+
+		assertThatThrownBy(() -> this.service.approve(ORDER_ID)).isInstanceOf(DataIntegrityViolationException.class);
+
+		verifyNoInteractions(this.notifications);
 	}
 
 	private static Order orderIn(OrderStatus status) {
