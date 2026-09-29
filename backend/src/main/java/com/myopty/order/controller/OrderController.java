@@ -160,6 +160,65 @@ public class OrderController {
 		return ApiResponse.ok(OrderMapper.toResponse(this.service.reject(orderId, request.reason())));
 	}
 
+	/**
+	 * The three production steps share one validation, so they are described once
+	 * here and each endpoint only names the state it moves to.
+	 */
+	private ApiResponse<OrderResponse> productionStep(Long orderId, OrderStatus requested) {
+		return switch (requested) {
+			case PROCESSING -> ApiResponse.ok(OrderMapper.toResponse(this.service.markProcessing(orderId)));
+			case READY -> ApiResponse.ok(OrderMapper.toResponse(this.service.markReady(orderId)));
+			case DISPATCHED -> ApiResponse.ok(OrderMapper.toResponse(this.service.markDispatched(orderId)));
+			default -> throw new InvalidOrderException("That is not a production step",
+					Map.of("status", "must be PROCESSING, READY or DISPATCHED"));
+		};
+	}
+
+	@Operation(summary = "Mark an order as being made",
+			description = "Moves an approved order into production. The step has to be legal from the order's current "
+					+ "status: an order cannot be processed before it is approved, and a finished or rejected order cannot "
+					+ "be moved at all. Steps may be skipped, so an order already in stock can go straight to ready or "
+					+ "dispatched without recording work that never happened. Nothing moves backwards.")
+	@ApiResponses({
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+					description = "Order is now being made"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404", description = "Order not found"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409",
+					description = "The order cannot be moved to PROCESSING from where it is") })
+	@PutMapping("/{orderId}/processing")
+	public ApiResponse<OrderResponse> markProcessing(
+			@Parameter(description = "Order id", required = true) @PathVariable Long orderId) {
+		return productionStep(orderId, OrderStatus.PROCESSING);
+	}
+
+	@Operation(summary = "Mark an order as ready to collect",
+			description = "Records that the order is finished and waiting for the customer. Legal from an approved or "
+					+ "in-progress order, and skipped steps are allowed.")
+	@ApiResponses({
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+					description = "Order is ready to collect"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404", description = "Order not found"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409",
+					description = "The order cannot be moved to READY from where it is") })
+	@PutMapping("/{orderId}/ready")
+	public ApiResponse<OrderResponse> markReady(
+			@Parameter(description = "Order id", required = true) @PathVariable Long orderId) {
+		return productionStep(orderId, OrderStatus.READY);
+	}
+
+	@Operation(summary = "Mark an order as dispatched",
+			description = "Records that the order has been handed over or sent to the customer. This is the last step: "
+					+ "a dispatched order cannot be moved again, and a rejected one never gets here.")
+	@ApiResponses({
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+					description = "Order is dispatched"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404", description = "Order not found"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409",
+					description = "The order cannot be moved to DISPATCHED from where it is") })
+	@PutMapping("/{orderId}/dispatched")
+	public ApiResponse<OrderResponse> markDispatched(
+			@Parameter(description = "Order id", required = true) @PathVariable Long orderId) {
+		return productionStep(orderId, OrderStatus.DISPATCHED);
 	@Operation(summary = "Set the estimated receive date",
 			description = "Corrects the estimated receive date, or withdraws it. The date quoted when the order was "
 					+ "approved is worked out from a configured lab lead time, which cannot know that a frame came back "
