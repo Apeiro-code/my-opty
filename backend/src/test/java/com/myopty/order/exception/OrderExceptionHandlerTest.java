@@ -9,6 +9,7 @@ import com.myopty.order.dto.ApiResponse;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.BeanPropertyBindingResult;
 import org.springframework.validation.BindException;
 import org.springframework.validation.FieldError;
@@ -132,6 +133,75 @@ class OrderExceptionHandlerTest {
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_GATEWAY);
 		assertThat(response.getBody()).isNotNull();
 		assertThat(response.getBody().error().code()).isEqualTo("DOCUMENT_STORAGE_UNAVAILABLE");
+	}
+
+	@Test
+	void reportsAnUnknownOrder() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler.handleOrderNotFound(new OrderNotFoundException(99L));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("ORDER_NOT_FOUND");
+		assertThat(response.getBody().error().message()).isEqualTo("Order 99 was not found");
+	}
+
+	/**
+	 * The reverse lookup fails with the prescription's id rather than an order id,
+	 * so the message has to name the id the customer actually asked with.
+	 */
+	@Test
+	void reportsAPrescriptionThatHasNotBeenOrdered() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler
+			.handleOrderNotFound(new OrderNotFoundException("Prescription 12 has not been ordered yet"));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("ORDER_NOT_FOUND");
+		assertThat(response.getBody().error().message()).isEqualTo("Prescription 12 has not been ordered yet");
+	}
+
+	@Test
+	void reportsAnOrderTypeThatDoesNotFitThePrescription() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler
+			.handleInvalidOrder(new InvalidOrderException("Some order values are not valid",
+					Map.of("orderType", "a progressive lens needs a prescription with a near addition on both eyes")));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("INVALID_ORDER");
+		assertThat(response.getBody().error().fieldErrors()).containsKey("orderType");
+	}
+
+	/**
+	 * A conflict, not a bad request: the order was well formed and lost the race
+	 * with an identical one, so a 400 would invite a retry that can never work.
+	 */
+	@Test
+	void reportsASecondOrderForOnePrescriptionAsAConflict() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler
+			.handleOrderAlreadyExists(new OrderAlreadyExistsException(12L));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("ORDER_ALREADY_EXISTS");
+		assertThat(response.getBody().error().fieldErrors()).containsKey("prescriptionId");
+	}
+
+	/**
+	 * An order type the API cannot parse is the customer's typo, so it has to come
+	 * back as a 400. Left unhandled it would be a 500, which says "retry" and would
+	 * never help. The non-numeric id in the path reaches the same handler and is
+	 * covered end to end by {@code OrderControllerTest}.
+	 */
+	@Test
+	void reportsAnUnreadableOrderAsABadRequestRatherThanAServerFault() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler
+			.handleUnreadableBody(new HttpMessageNotReadableException("unknown order type", null));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("MALFORMED_REQUEST");
+		assertThat(response.getBody().error().fieldErrors()).isNullOrEmpty();
 	}
 
 	private static FieldError fieldError(String field, String message) {
