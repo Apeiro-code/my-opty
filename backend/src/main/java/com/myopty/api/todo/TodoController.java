@@ -40,6 +40,8 @@ public class TodoController {
                     todo.setTitle(todoDetails.getTitle());
                     todo.setDescription(todoDetails.getDescription());
                     todo.setDueDate(todoDetails.getDueDate());
+                    todo.setStatus(todoDetails.getStatus());
+                    todo.setPriority(todoDetails.getPriority());
                     return ResponseEntity.ok(todoRepository.save(todo));
                 })
                 .orElse(ResponseEntity.notFound().build());
@@ -53,5 +55,11 @@ public class TodoController {
                     return ResponseEntity.ok().<Void>build();
                 })
                 .orElse(ResponseEntity.notFound().build());
+    }
+
+
+    @GetMapping("/status/{status}")
+    public List<Todo> getTodosByStatus(@PathVariable String status) {
+        return todoRepository.findByStatus(Todo.Status.valueOf(status));
     }
 }
