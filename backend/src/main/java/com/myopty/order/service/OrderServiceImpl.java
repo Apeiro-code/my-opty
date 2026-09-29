@@ -13,6 +13,7 @@ import com.myopty.order.domain.PrescriptionStatus;
 import com.myopty.order.dto.OrderCreateRequest;
 import com.myopty.order.exception.InvalidOrderException;
 import com.myopty.order.exception.OrderAlreadyExistsException;
+import com.myopty.order.exception.OrderNotAdvancableException;
 import com.myopty.order.exception.OrderNotFoundException;
 import com.myopty.order.exception.OrderNotReviewableException;
 import com.myopty.order.exception.PrescriptionNotFoundException;
@@ -131,16 +132,59 @@ public class OrderServiceImpl implements OrderService {
 	 * Loads an order the client is allowed to decide on, and refuses one that has
 	 * already been decided.
 	 *
-	 * <p>Checking the status here rather than at each call site means approve and
-	 * reject cannot drift apart, and it is a 409 rather than a 400 because the
+	 * <p>Asking the status what it can advance to rather than comparing against
+	 * {@code PENDING_REVIEW} here means the review decision and the production
+	 * steps are described by the same rule, and cannot drift apart.
+	 *
+	 * <p>Checking it here rather than at each call site means approve and reject
+	 * cannot drift apart either, and it is a 409 rather than a 400 because the
 	 * request was well formed: it simply no longer applies to this order.
 	 */
 	private Order pendingDecision(Long orderId) {
 		Order order = this.repository.findById(orderId).orElseThrow(() -> new OrderNotFoundException(orderId));
-		if (order.getStatus() != OrderStatus.PENDING_REVIEW) {
+		if (!order.getStatus().canAdvanceTo(OrderStatus.APPROVED)) {
 			throw new OrderNotReviewableException(orderId, nameOf(order.getStatus()));
 		}
 		return order;
+	}
+
+	@Override
+	public Order markProcessing(Long orderId) {
+		return advance(orderId, OrderStatus.PROCESSING);
+	}
+
+	@Override
+	public Order markReady(Long orderId) {
+		return advance(orderId, OrderStatus.READY);
+	}
+
+	@Override
+	public Order markDispatched(Long orderId) {
+		return advance(orderId, OrderStatus.DISPATCHED);
+	}
+
+	/**
+	 * Moves an order one step along the workshop, refusing a move the status does
+	 * not allow.
+	 *
+	 * <p>All three steps go through here so the rule is applied identically to each
+	 * of them. Which step is legal is decided by {@link OrderStatus}, not here, so
+	 * the transition graph has one definition rather than one per endpoint.
+	 *
+	 * <p>Unlike approving, a step does not read the prescription: the order was
+	 * already accepted for production against a verified prescription, and that
+	 * cannot be taken back, so there is nothing left to check.
+	 */
+	private Order advance(Long orderId, OrderStatus requested) {
+		Order order = this.repository.findById(orderId).orElseThrow(() -> new OrderNotFoundException(orderId));
+
+		if (!order.getStatus().canAdvanceTo(requested)) {
+			throw new OrderNotAdvancableException(orderId, nameOf(order.getStatus()), requested);
+		}
+
+		order.setStatus(requested);
+		order.setUpdatedAt(Instant.now());
+		return this.repository.save(order);
 	}
 
 	/**

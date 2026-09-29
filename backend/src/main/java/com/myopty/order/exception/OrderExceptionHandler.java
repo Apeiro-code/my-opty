@@ -115,6 +115,18 @@ public class OrderExceptionHandler {
 	}
 
 	/**
+	 * The order is real and the step asked for is a real one, but this order cannot
+	 * make that move: a rejected order never enters production, and a dispatched one
+	 * has nothing left to do. 409 because the same request would work on an order in
+	 * the right state.
+	 */
+	@ExceptionHandler(OrderNotAdvancableException.class)
+	ResponseEntity<ApiResponse<Void>> handleOrderNotAdvancable(OrderNotAdvancableException ex) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+			.body(ApiResponse.error("ORDER_NOT_ADVANCABLE", ex.getMessage()));
+	}
+
+	/**
 	 * A body the JSON reader cannot turn into the request, which for this module
 	 * most often means an order type spelled wrongly. Reporting it as a bad
 	 * request is the point: without this the customer would see a 500 for a

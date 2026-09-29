@@ -93,6 +93,9 @@ GET    /api/orders?prescriptionId=         # Order built from a prescription
 GET    /api/orders?status=                 # Approval queue (client)
 PUT    /api/orders/{id}/approve            # Client approve
 PUT    /api/orders/{id}/reject             # Client reject, body: { "reason": "..." }
+PUT    /api/orders/{id}/processing         # Client: now in the lab
+PUT    /api/orders/{id}/ready              # Client: ready to collect
+PUT    /api/orders/{id}/dispatched         # Client: handed over or sent
 POST   /api/discounts                      # Create discount (client)
 GET    /api/discounts                      # List (with active filter)
 PUT    /api/discounts/{id}                 # Update discount
@@ -110,6 +113,11 @@ Notes on the implemented endpoints:
   always returns an array. Queue endpoints return at most 100 rows, oldest first.
 - An order can only be approved once its prescription is `VERIFIED`, so nothing
   unreviewed reaches production. Reviewing is one-way: there is no re-review.
+- The client moves an approved order along with `/processing`, `/ready` and
+  `/dispatched`. The workflow is forward-only and a step may be skipped (a frame
+  already in stock never gets processed); `DISPATCHED` and `REJECTED` are terminal.
+  A generic "set status" endpoint is deliberately absent, so a client cannot name a
+  state the workflow has not reached.
 - **These review and approval endpoints are not yet authenticated.** The module has
   no authentication or roles yet, so anyone who can reach the API can approve or
   reject production work. Auth belongs to the shared module; see CONTRIBUTION.md.
