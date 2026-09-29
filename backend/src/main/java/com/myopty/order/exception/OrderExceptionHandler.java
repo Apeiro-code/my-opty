@@ -9,11 +9,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.BindException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.multipart.MultipartException;
 import org.springframework.web.multipart.support.MissingServletRequestPartException;
@@ -55,6 +57,41 @@ public class OrderExceptionHandler {
 	ResponseEntity<ApiResponse<Void>> handleInvalidDocument(InvalidPrescriptionDocumentException ex) {
 		return ResponseEntity.badRequest()
 			.body(ApiResponse.error("INVALID_DOCUMENT", ex.getMessage(), Map.of("document", ex.getMessage())));
+	}
+
+	@ExceptionHandler(OrderNotFoundException.class)
+	ResponseEntity<ApiResponse<Void>> handleOrderNotFound(OrderNotFoundException ex) {
+		return ResponseEntity.status(HttpStatus.NOT_FOUND)
+			.body(ApiResponse.error("ORDER_NOT_FOUND", ex.getMessage()));
+	}
+
+	@ExceptionHandler(InvalidOrderException.class)
+	ResponseEntity<ApiResponse<Void>> handleInvalidOrder(InvalidOrderException ex) {
+		return ResponseEntity.badRequest()
+			.body(ApiResponse.error("INVALID_ORDER", ex.getMessage(), ex.getFieldErrors()));
+	}
+
+	/**
+	 * Not a bad request: the order was well formed, it just collides with one that
+	 * already exists, so sending the same body again can never succeed.
+	 */
+	@ExceptionHandler(OrderAlreadyExistsException.class)
+	ResponseEntity<ApiResponse<Void>> handleOrderAlreadyExists(OrderAlreadyExistsException ex) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+			.body(ApiResponse.error("ORDER_ALREADY_EXISTS", ex.getMessage(), Map.of("prescriptionId", ex.getMessage())));
+	}
+
+	/**
+	 * A body the JSON reader cannot turn into the request, which for this module
+	 * most often means an order type spelled wrongly. Reporting it as a bad
+	 * request is the point: without this the customer would see a 500 for a
+	 * typo, and a 500 says retry, which would never help.
+	 */
+	@ExceptionHandler({ HttpMessageNotReadableException.class, MethodArgumentTypeMismatchException.class })
+	ResponseEntity<ApiResponse<Void>> handleUnreadableBody(Exception ex) {
+		logger.debug("Rejected an unreadable order request", ex);
+		return ResponseEntity.badRequest()
+			.body(ApiResponse.error("MALFORMED_REQUEST", "The order request could not be read", null));
 	}
 
 	@ExceptionHandler(MissingServletRequestPartException.class)
