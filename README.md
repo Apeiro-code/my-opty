@@ -96,6 +96,7 @@ PUT    /api/orders/{id}/reject             # Client reject, body: { "reason": ".
 PUT    /api/orders/{id}/processing         # Client: now in the lab
 PUT    /api/orders/{id}/ready              # Client: ready to collect
 PUT    /api/orders/{id}/dispatched         # Client: handed over or sent
+PUT    /api/orders/{id}/receive-date       # Set or withdraw the estimate, body: { "receiveDate": "YYYY-MM-DD" }
 POST   /api/discounts                      # Create discount (client)
 GET    /api/discounts                      # List (with active filter)
 PUT    /api/discounts/{id}                 # Update discount
@@ -118,6 +119,10 @@ Notes on the implemented endpoints:
   already in stock never gets processed); `DISPATCHED` and `REJECTED` are terminal.
   A generic "set status" endpoint is deliberately absent, so a client cannot name a
   state the workflow has not reached.
+- Approving quotes an estimated receive date from the lab lead time configured for
+  that order type (`myopty.lab.lead-days`). The client can correct it, since only
+  the shop knows its real queue. Stock is not part of the calculation until the
+  catalog module's frame table (V2) exists.
 - **These review and approval endpoints are not yet authenticated.** The module has
   no authentication or roles yet, so anyone who can reach the API can approve or
   reject production work. Auth belongs to the shared module; see CONTRIBUTION.md.

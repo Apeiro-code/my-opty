@@ -7,6 +7,16 @@ spring:
       max-request-size: 12MB
 
 myopty:
+  lab:
+    # Days to add to the approval date to get the estimated receive date shown to
+    # the customer. A progressive lens takes longest because the lab has to grind
+    # the corridor rather than cut a finished shape. These are estimates: the
+    # client can override the date on an order, and stock is not part of the
+    # calculation until the catalog module's frame table (V2) exists.
+    lead-days:
+      SINGLE_VISION: 7
+      BIFOCAL: 10
+      PROGRESSIVE: 14
   documents:
     max-size-bytes: 10485760
     content-types:

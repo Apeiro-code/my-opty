@@ -1,10 +1,13 @@
 package com.myopty.order.service;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import com.myopty.order.config.LabProperties;
 import com.myopty.order.domain.Order;
 import com.myopty.order.domain.OrderStatus;
 import com.myopty.order.domain.OrderType;
@@ -14,6 +17,7 @@ import com.myopty.order.dto.OrderCreateRequest;
 import com.myopty.order.exception.InvalidOrderException;
 import com.myopty.order.exception.OrderAlreadyExistsException;
 import com.myopty.order.exception.OrderNotAdvancableException;
+import com.myopty.order.exception.OrderNotApprovedException;
 import com.myopty.order.exception.OrderNotFoundException;
 import com.myopty.order.exception.OrderNotReviewableException;
 import com.myopty.order.exception.PrescriptionNotFoundException;
@@ -39,6 +43,11 @@ import org.springframework.transaction.annotation.Transactional;
  * {@code PENDING_REVIEW}: an order is approved only against a {@code VERIFIED}
  * prescription, or rejected with a reason. Both leave the production statuses
  * untouched, because moving an order along the workshop is a later story.
+ *
+ * <p>Approving is also when the customer first gets told when to expect the order.
+ * A receive date is quoted from the configured lab lead time for the order's type
+ * and can then be corrected by the client, who knows the real queue length in a
+ * way this module cannot.
  */
 @Service
 @Transactional
@@ -54,9 +63,16 @@ public class OrderServiceImpl implements OrderService {
 
 	private final PrescriptionRepository prescriptions;
 
-	public OrderServiceImpl(OrderRepository repository, PrescriptionRepository prescriptions) {
+	private final LabProperties lab;
+
+	private final Clock clock;
+
+	public OrderServiceImpl(OrderRepository repository, PrescriptionRepository prescriptions, LabProperties lab,
+			Clock clock) {
 		this.repository = repository;
 		this.prescriptions = prescriptions;
+		this.lab = lab;
+		this.clock = clock;
 	}
 
 	@Override
@@ -115,6 +131,52 @@ public class OrderServiceImpl implements OrderService {
 		}
 
 		order.setStatus(OrderStatus.APPROVED);
+		order.setUpdatedAt(Instant.now());
+
+		// Only fill the date in when the column is empty. Nothing in the API can set
+		// a date before approval, so on an ordinary order this is the first and only
+		// write to it; the guard is here so a row that already carries a date is
+		// respected rather than replaced by a number worked out from a lead time.
+		if (!order.hasReceiveDate()) {
+			order.setReceiveDate(estimateReceiveDate(order));
+		}
+
+		return this.repository.save(order);
+	}
+
+	/**
+	 * The date the shop is quoting on: today plus the lead time configured for this
+	 * order's type.
+	 *
+	 * <p>Read from the {@link Clock} rather than the system clock so the value is
+	 * assertable in a test. An estimate is a date and not an instant, so it comes
+	 * out in the shop's own zone: an order approved at half past midnight local time
+	 * is due the local day count, not a UTC one.
+	 */
+	private LocalDate estimateReceiveDate(Order order) {
+		OrderType orderType = order.getOrderType();
+		int leadDays = this.lab.leadDaysFor(orderType);
+		return LocalDate.now(this.clock).plusDays(leadDays);
+	}
+
+	@Override
+	public Order setReceiveDate(Long orderId, LocalDate receiveDate) {
+		Order order = this.repository.findById(orderId).orElseThrow(() -> new OrderNotFoundException(orderId));
+
+		if (order.getStatus() == OrderStatus.REJECTED || order.getStatus() == OrderStatus.PENDING_REVIEW) {
+			throw new OrderNotApprovedException(orderId, nameOf(order.getStatus()));
+		}
+
+		// Null clears the date, which is the shop withdrawing an estimate it can no
+		// longer stand behind. A date in the past would tell the customer their
+		// order is due before it was even approved, so it is refused rather than
+		// stored.
+		if (receiveDate != null && receiveDate.isBefore(LocalDate.now(this.clock))) {
+			throw new InvalidOrderException("A receive date cannot be in the past",
+					Map.of("receiveDate", "must be today or later"));
+		}
+
+		order.setReceiveDate(receiveDate);
 		order.setUpdatedAt(Instant.now());
 		return this.repository.save(order);
 	}
