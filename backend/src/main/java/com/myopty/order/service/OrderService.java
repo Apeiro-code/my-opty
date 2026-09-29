@@ -1,5 +1,6 @@
 package com.myopty.order.service;
 
+import java.time.LocalDate;
 import java.util.List;
 
 import com.myopty.order.domain.Order;
@@ -58,6 +59,11 @@ public interface OrderService {
 	 * approved from {@code PENDING_REVIEW} and only against a {@code VERIFIED}
 	 * prescription, so nothing unverified reaches the lab.
 	 *
+	 * <p>Approving also quotes the estimated receive date, so the customer learns
+	 * when to expect the order from the same action that starts the work. A date
+	 * already on the order is kept, because a date the shop set deliberately
+	 * carries more information than one derived from a lead time.
+	 *
 	 * @throws com.myopty.order.exception.OrderNotFoundException          if no such order exists
 	 * @throws com.myopty.order.exception.OrderNotReviewableException     if the order has already been decided
 	 * @throws com.myopty.order.exception.PrescriptionNotFoundException   if the linked prescription is gone
@@ -110,5 +116,24 @@ public interface OrderService {
 	 * @throws com.myopty.order.exception.OrderNotAdvancableException if the order cannot be moved to DISPATCHED from where it is
 	 */
 	Order markDispatched(Long orderId);
+	 * Corrects the estimated receive date, or withdraws it.
+	 *
+	 * <p>The estimate quoted on approval is worked out from a configured lead time,
+	 * which cannot know that a frame came back in stock or that the lab is
+	 * queueing. The client does, so this overwrites the date, and passing
+	 * {@code null} clears it for when an estimate has to be withdrawn rather than
+	 * replaced.
+	 *
+	 * <p>Only an order the shop has actually accepted carries a date. A date on an
+	 * order still awaiting review would promise something for work that has not
+	 * started, and a date on a rejected one is a contradiction.
+	 *
+	 * @param receiveDate the date the customer should expect the order, or
+	 *                    {@code null} to withdraw the estimate; must not be in the past
+	 * @throws com.myopty.order.exception.OrderNotFoundException   if no such order exists
+	 * @throws com.myopty.order.exception.OrderNotApprovedException if the order has not been approved
+	 * @throws com.myopty.order.exception.InvalidOrderException    if the date is in the past
+	 */
+	Order setReceiveDate(Long orderId, LocalDate receiveDate);
 
 }

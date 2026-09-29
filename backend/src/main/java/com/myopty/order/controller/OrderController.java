@@ -8,6 +8,7 @@ import com.myopty.order.domain.OrderStatus;
 import com.myopty.order.dto.ApiResponse;
 import com.myopty.order.dto.OrderCreateRequest;
 import com.myopty.order.dto.OrderResponse;
+import com.myopty.order.dto.ReceiveDateRequest;
 import com.myopty.order.dto.RejectionRequest;
 import com.myopty.order.exception.InvalidOrderException;
 import com.myopty.order.mapper.OrderMapper;
@@ -218,6 +219,26 @@ public class OrderController {
 	public ApiResponse<OrderResponse> markDispatched(
 			@Parameter(description = "Order id", required = true) @PathVariable Long orderId) {
 		return productionStep(orderId, OrderStatus.DISPATCHED);
+	@Operation(summary = "Set the estimated receive date",
+			description = "Corrects the estimated receive date, or withdraws it. The date quoted when the order was "
+					+ "approved is worked out from a configured lab lead time, which cannot know that a frame came back "
+					+ "in stock or that the lab is queueing, so the client can replace it. Sending no date withdraws the "
+					+ "estimate. Only an order the shop has accepted carries a date, and a date in the past is refused "
+					+ "because it would tell the customer their order is due before it was approved.")
+	@ApiResponses({
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+					description = "Receive date set, or withdrawn"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400",
+					description = "The date is in the past"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404", description = "Order not found"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409",
+					description = "The order has not been approved, or was rejected") })
+	@PutMapping("/{orderId}/receive-date")
+	public ApiResponse<OrderResponse> setReceiveDate(
+			@Parameter(description = "Order id", required = true) @PathVariable Long orderId,
+			@Parameter(description = "Date the customer should expect the order; omit to withdraw the estimate", //
+			required = true) @RequestBody ReceiveDateRequest request) {
+		return ApiResponse.ok(OrderMapper.toResponse(this.service.setReceiveDate(orderId, request.receiveDate())));
 	}
 
 }

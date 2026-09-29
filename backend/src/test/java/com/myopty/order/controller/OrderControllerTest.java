@@ -22,6 +22,7 @@ import com.myopty.order.exception.InvalidOrderException;
 import com.myopty.order.exception.OrderAlreadyExistsException;
 import com.myopty.order.exception.OrderExceptionHandler;
 import com.myopty.order.exception.OrderNotAdvancableException;
+import com.myopty.order.exception.OrderNotApprovedException;
 import com.myopty.order.exception.OrderNotFoundException;
 import com.myopty.order.exception.OrderNotReviewableException;
 import com.myopty.order.exception.PrescriptionNotFoundException;
@@ -442,6 +443,81 @@ class OrderControllerTest {
 		when(this.service.markProcessing(3L)).thenThrow(new OrderNotFoundException(3L));
 
 		this.mockMvc.perform(put("/api/orders/3/processing"))
+	void setsTheReceiveDate() throws Exception {
+		Order dated = approvedOrder();
+		dated.setReceiveDate(LocalDate.of(2026, 10, 27));
+		when(this.service.setReceiveDate(3L, LocalDate.of(2026, 10, 27))).thenReturn(dated);
+
+		this.mockMvc
+			.perform(put("/api/orders/3/receive-date").contentType(MediaType.APPLICATION_JSON)
+				.content("{\"receiveDate\":\"2026-10-27\"}"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.receiveDate").value("2026-10-27"));
+	}
+
+	/**
+	 * A body with no date is the documented way to withdraw an estimate, so the
+	 * service is handed a null rather than the request being rejected.
+	 */
+	@Test
+	void withdrawsTheEstimateWhenTheBodyCarriesNoDate() throws Exception {
+		Order withdrawn = approvedOrder();
+		withdrawn.setReceiveDate(null);
+		when(this.service.setReceiveDate(3L, null)).thenReturn(withdrawn);
+
+		this.mockMvc
+			.perform(put("/api/orders/3/receive-date").contentType(MediaType.APPLICATION_JSON).content("{}"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.receiveDate").doesNotExist());
+	}
+
+	@Test
+	void refusesAReceiveDateInThePast() throws Exception {
+		when(this.service.setReceiveDate(3L, LocalDate.of(2026, 1, 1)))
+			.thenThrow(new InvalidOrderException("A receive date cannot be in the past",
+					Map.of("receiveDate", "must be today or later")));
+
+		this.mockMvc
+			.perform(put("/api/orders/3/receive-date").contentType(MediaType.APPLICATION_JSON)
+				.content("{\"receiveDate\":\"2026-01-01\"}"))
+			.andExpect(status().isBadRequest())
+			.andExpect(jsonPath("$.error.code").value("INVALID_ORDER"))
+			.andExpect(jsonPath("$.error.fieldErrors.receiveDate").value("must be today or later"));
+	}
+
+	@Test
+	void refusesAReceiveDateOnAnOrderThatHasNotBeenApproved() throws Exception {
+		when(this.service.setReceiveDate(3L, LocalDate.of(2026, 10, 27)))
+			.thenThrow(new OrderNotApprovedException(3L, "PENDING_REVIEW"));
+
+		this.mockMvc
+			.perform(put("/api/orders/3/receive-date").contentType(MediaType.APPLICATION_JSON)
+				.content("{\"receiveDate\":\"2026-10-27\"}"))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.error.code").value("ORDER_NOT_APPROVED"));
+	}
+
+	/**
+	 * A date the JSON reader cannot parse is a 400 rather than a 500, so a client
+	 * typing the format wrong is told so instead of being told to retry.
+	 */
+	@Test
+	void refusesAReceiveDateItCannotRead() throws Exception {
+		this.mockMvc
+			.perform(put("/api/orders/3/receive-date").contentType(MediaType.APPLICATION_JSON)
+				.content("{\"receiveDate\":\"27/10/2026\"}"))
+			.andExpect(status().isBadRequest())
+			.andExpect(jsonPath("$.error.code").value("MALFORMED_REQUEST"));
+	}
+
+	@Test
+	void reportsAnUnknownOrderWhenSettingTheReceiveDate() throws Exception {
+		when(this.service.setReceiveDate(3L, LocalDate.of(2026, 10, 27)))
+			.thenThrow(new OrderNotFoundException(3L));
+
+		this.mockMvc
+			.perform(put("/api/orders/3/receive-date").contentType(MediaType.APPLICATION_JSON)
+				.content("{\"receiveDate\":\"2026-10-27\"}"))
 			.andExpect(status().isNotFound())
 			.andExpect(jsonPath("$.error.code").value("ORDER_NOT_FOUND"));
 	}
