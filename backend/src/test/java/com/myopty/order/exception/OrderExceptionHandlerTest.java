@@ -1,0 +1,141 @@
+package com.myopty.order.exception;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.util.Map;
+
+import com.myopty.order.dto.ApiResponse;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.validation.BeanPropertyBindingResult;
+import org.springframework.validation.BindException;
+import org.springframework.validation.FieldError;
+import org.springframework.validation.ObjectError;
+import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
+
+/**
+ * The error contract of the module: every failure a customer can trigger has to
+ * come back in the standard envelope with a stable code, because the form on the
+ * client keys off those codes.
+ */
+class OrderExceptionHandlerTest {
+
+	private final OrderExceptionHandler handler = new OrderExceptionHandler();
+
+	@Test
+	void reportsAMissingPrescription() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler
+			.handleNotFound(new PrescriptionNotFoundException(99L));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().success()).isFalse();
+		assertThat(response.getBody().error().code()).isEqualTo("PRESCRIPTION_NOT_FOUND");
+		assertThat(response.getBody().error().message()).isEqualTo("Prescription 99 was not found");
+	}
+
+	@Test
+	void reportsAMissingDocumentAsNotFoundRatherThanAStorageOutage() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler
+			.handleDocumentNotFound(new PrescriptionDocumentNotFoundException(42L));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("DOCUMENT_NOT_FOUND");
+		assertThat(response.getBody().error().message()).isEqualTo("Prescription 42 has no document attached");
+	}
+
+	@Test
+	void reportsCrossFieldOpticalProblemsWithTheOffendingFields() {		InvalidPrescriptionException ex = new InvalidPrescriptionException("The optical values are inconsistent",
+				Map.of("rightEye.axis", "an axis is required when the cylinder is not zero"));
+
+		ResponseEntity<ApiResponse<Void>> response = this.handler.handleInvalidPrescription(ex);
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("INVALID_PRESCRIPTION");
+		assertThat(response.getBody().error().fieldErrors()).containsEntry("rightEye.axis",
+				"an axis is required when the cylinder is not zero");
+	}
+
+	@Test
+	void reportsAnUnusableDocumentAgainstTheDocumentField() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler
+			.handleInvalidDocument(new InvalidPrescriptionDocumentException("Only JPEG, PNG, WebP, HEIC and PDF are allowed"));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("INVALID_DOCUMENT");
+		assertThat(response.getBody().error().fieldErrors()).containsKey("document");
+	}
+
+	@Test
+	void namesTheMissingPart() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler
+			.handleMissingPart(new MissingServletRequestPartException("document"));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("MISSING_PART");
+		assertThat(response.getBody().error().fieldErrors()).containsKey("document");
+	}
+
+	@Test
+	void collectsEveryInvalidFieldOfTheRequestPart() {
+		BeanPropertyBindingResult binding = new BeanPropertyBindingResult(new Object(), "prescription");
+		binding.addError(fieldError("rightEye.sphere", "must be between -30.00 and 30.00"));
+		binding.addError(fieldError("leftEye.cylinder", "must be between -10.00 and 10.00"));
+		binding.addError(new ObjectError("prescription", new String[] { "rightEye" }, null, "the right eye is required"));
+
+		ResponseEntity<ApiResponse<Void>> response = this.handler.handleValidation(new BindException(binding));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("VALIDATION_FAILED");
+		assertThat(response.getBody().error().fieldErrors()).containsOnlyKeys("rightEye.sphere", "leftEye.cylinder",
+				"prescription");
+	}
+
+	@Test
+	void reportsAnOversizedUploadSeparatelyFromOtherBadRequests() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler.handleTooLarge(new MaxUploadSizeExceededException(10L));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.PAYLOAD_TOO_LARGE);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("DOCUMENT_TOO_LARGE");
+	}
+
+	@Test
+	void hidesTheDetailOfAMalformedRequest() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler
+			.handleMalformedRequest(new MissingServletRequestParameterException("id", "java.lang.Long"));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("MALFORMED_REQUEST");
+		assertThat(response.getBody().error().fieldErrors()).isNullOrEmpty();
+	}
+
+	/**
+	 * Object storage is downstream of the API, so its failures must look retryable
+	 * rather than like a fault in what the customer submitted.
+	 */
+	@Test
+	void reportsStorageTroubleAsBadGateway() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler
+			.handleStorageFailure(new DocumentStorageException("minio down"));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_GATEWAY);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("DOCUMENT_STORAGE_UNAVAILABLE");
+	}
+
+	private static FieldError fieldError(String field, String message) {
+		return new FieldError("prescription", field, null, false, null, null, message);
+	}
+
+}
