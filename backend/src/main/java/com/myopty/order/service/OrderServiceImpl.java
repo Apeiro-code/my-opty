@@ -67,12 +67,15 @@ public class OrderServiceImpl implements OrderService {
 
 	private final Clock clock;
 
+	private final OrderNotificationService notifications;
+
 	public OrderServiceImpl(OrderRepository repository, PrescriptionRepository prescriptions, LabProperties lab,
-			Clock clock) {
+			Clock clock, OrderNotificationService notifications) {
 		this.repository = repository;
 		this.prescriptions = prescriptions;
 		this.lab = lab;
 		this.clock = clock;
+		this.notifications = notifications;
 	}
 
 	@Override
@@ -141,7 +144,9 @@ public class OrderServiceImpl implements OrderService {
 			order.setReceiveDate(estimateReceiveDate(order));
 		}
 
-		return this.repository.save(order);
+		Order approved = this.repository.save(order);
+		this.notifications.record(approved, OrderStatus.PENDING_REVIEW, OrderStatus.APPROVED);
+		return approved;
 	}
 
 	/**
@@ -187,7 +192,14 @@ public class OrderServiceImpl implements OrderService {
 		order.setStatus(OrderStatus.REJECTED);
 		order.setRejectionReason(validateRejectionReason(reason));
 		order.setUpdatedAt(Instant.now());
-		return this.repository.save(order);
+
+		Order rejected = this.repository.save(order);
+		// Telling the customer is the point of a rejection. The reason is on the
+		// order and the notification points at the order, so the message does not
+		// repeat it: a reason in an email and a different reason in the shop's
+		// records is the kind of disagreement nobody can resolve afterwards.
+		this.notifications.record(rejected, OrderStatus.PENDING_REVIEW, OrderStatus.REJECTED);
+		return rejected;
 	}
 
 	/**
@@ -240,13 +252,21 @@ public class OrderServiceImpl implements OrderService {
 	private Order advance(Long orderId, OrderStatus requested) {
 		Order order = this.repository.findById(orderId).orElseThrow(() -> new OrderNotFoundException(orderId));
 
-		if (!order.getStatus().canAdvanceTo(requested)) {
-			throw new OrderNotAdvancableException(orderId, nameOf(order.getStatus()), requested);
+		OrderStatus from = order.getStatus();
+		if (!from.canAdvanceTo(requested)) {
+			throw new OrderNotAdvancableException(orderId, nameOf(from), requested);
 		}
 
 		order.setStatus(requested);
 		order.setUpdatedAt(Instant.now());
-		return this.repository.save(order);
+
+		Order moved = this.repository.save(order);
+		// Recorded here rather than in markProcessing, markReady and markDispatched,
+		// so the three workshop steps cannot each forget to tell the customer. The
+		// from status is captured before the change, which is why it is held in a
+		// local rather than read back off the order afterwards.
+		this.notifications.record(moved, from, requested);
+		return moved;
 	}
 
 	/**
