@@ -115,6 +115,17 @@ public class OrderExceptionHandler {
 	}
 
 	/**
+	 * The order is real and the date is well formed, but this order has not been
+	 * accepted yet, so it has no receive date to set. 409 because the same body
+	 * would work once the shop approves the order.
+	 */
+	@ExceptionHandler(OrderNotApprovedException.class)
+	ResponseEntity<ApiResponse<Void>> handleOrderNotApproved(OrderNotApprovedException ex) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+			.body(ApiResponse.error("ORDER_NOT_APPROVED", ex.getMessage()));
+	}
+
+	/**
 	 * A body the JSON reader cannot turn into the request, which for this module
 	 * most often means an order type spelled wrongly. Reporting it as a bad
 	 * request is the point: without this the customer would see a 500 for a

@@ -93,6 +93,7 @@ GET    /api/orders?prescriptionId=         # Order built from a prescription
 GET    /api/orders?status=                 # Approval queue (client)
 PUT    /api/orders/{id}/approve            # Client approve
 PUT    /api/orders/{id}/reject             # Client reject, body: { "reason": "..." }
+PUT    /api/orders/{id}/receive-date       # Set or withdraw the estimate, body: { "receiveDate": "YYYY-MM-DD" }
 POST   /api/discounts                      # Create discount (client)
 GET    /api/discounts                      # List (with active filter)
 PUT    /api/discounts/{id}                 # Update discount
@@ -110,6 +111,10 @@ Notes on the implemented endpoints:
   always returns an array. Queue endpoints return at most 100 rows, oldest first.
 - An order can only be approved once its prescription is `VERIFIED`, so nothing
   unreviewed reaches production. Reviewing is one-way: there is no re-review.
+- Approving quotes an estimated receive date from the lab lead time configured for
+  that order type (`myopty.lab.lead-days`). The client can correct it, since only
+  the shop knows its real queue. Stock is not part of the calculation until the
+  catalog module's frame table (V2) exists.
 - **These review and approval endpoints are not yet authenticated.** The module has
   no authentication or roles yet, so anyone who can reach the API can approve or
   reject production work. Auth belongs to the shared module; see CONTRIBUTION.md.
