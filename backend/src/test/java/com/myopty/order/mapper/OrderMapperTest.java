@@ -80,6 +80,27 @@ class OrderMapperTest {
 		assertThat(response.updatedAt()).isEqualTo(Instant.parse("2026-09-29T10:15:30Z"));
 	}
 
+	@Test
+	void carriesTheRejectionReasonOnceTheOrderIsRejected() {
+		Order order = order();
+		order.setStatus(OrderStatus.REJECTED);
+		order.setRejectionReason("frame out of stock");
+
+		OrderResponse response = OrderMapper.toResponse(order);
+
+		assertThat(response.status()).isEqualTo("REJECTED");
+		assertThat(response.rejectionReason()).isEqualTo("frame out of stock");
+	}
+
+	/**
+	 * Left null rather than empty so the field is omitted from the JSON entirely,
+	 * and a client cannot mistake an absent reason for a reason of "".
+	 */
+	@Test
+	void leavesTheRejectionReasonOutUntilThereIsOne() {
+		assertThat(OrderMapper.toResponse(order()).rejectionReason()).isNull();
+	}
+
 	private static Order order() {
 		Order order = new Order();
 		order.setOrderId(3L);

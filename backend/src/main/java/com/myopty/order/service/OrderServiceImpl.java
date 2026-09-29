@@ -2,17 +2,21 @@ package com.myopty.order.service;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import com.myopty.order.domain.Order;
 import com.myopty.order.domain.OrderStatus;
 import com.myopty.order.domain.OrderType;
 import com.myopty.order.domain.Prescription;
+import com.myopty.order.domain.PrescriptionStatus;
 import com.myopty.order.dto.OrderCreateRequest;
 import com.myopty.order.exception.InvalidOrderException;
 import com.myopty.order.exception.OrderAlreadyExistsException;
 import com.myopty.order.exception.OrderNotFoundException;
+import com.myopty.order.exception.OrderNotReviewableException;
 import com.myopty.order.exception.PrescriptionNotFoundException;
+import com.myopty.order.exception.PrescriptionNotVerifiedException;
 import com.myopty.order.repository.OrderRepository;
 import com.myopty.order.repository.PrescriptionRepository;
 
@@ -29,10 +33,21 @@ import org.springframework.transaction.annotation.Transactional;
  * the order can never end up owned by somebody other than the prescription's
  * owner. Both rules need two rows in hand, which is why they live here rather
  * than in bean validation on the request.
+ *
+ * <p>The client's decision on an order is one-way and starts at
+ * {@code PENDING_REVIEW}: an order is approved only against a {@code VERIFIED}
+ * prescription, or rejected with a reason. Both leave the production statuses
+ * untouched, because moving an order along the workshop is a later story.
  */
 @Service
 @Transactional
 public class OrderServiceImpl implements OrderService {
+
+	/**
+	 * Length of {@code progressive_order.rejection_reason} in
+	 * {@code V9__order_add_order_rejection.sql}.
+	 */
+	private static final int MAX_REJECTION_REASON = 500;
 
 	private final OrderRepository repository;
 
@@ -73,10 +88,86 @@ public class OrderServiceImpl implements OrderService {
 
 	@Override
 	@Transactional(readOnly = true)
-	public Order getByPrescriptionId(Long prescriptionId) {
-		return this.repository.findByPrescriptionId(prescriptionId)
-			.orElseThrow(() -> new OrderNotFoundException(
-					"Prescription " + prescriptionId + " has not been ordered yet"));
+	public List<Order> getByPrescriptionId(Long prescriptionId) {
+		return this.repository.findByPrescriptionId(prescriptionId).stream().toList();
+	}
+
+	@Override
+	@Transactional(readOnly = true)
+	public List<Order> listByStatus(OrderStatus status) {
+		return this.repository.findTop100ByStatusOrderByCreatedAtAscOrderIdAsc(status);
+	}
+
+	@Override
+	public Order approve(Long orderId) {
+		Order order = pendingDecision(orderId);
+
+		// Read the prescription rather than trusting the order, because the
+		// prescription's status is what decides this and it can change after the
+		// order was placed.
+		Prescription prescription = this.prescriptions.findById(order.getPrescriptionId())
+			.orElseThrow(() -> new PrescriptionNotFoundException(order.getPrescriptionId()));
+
+		if (prescription.getStatus() != PrescriptionStatus.VERIFIED) {
+			throw new PrescriptionNotVerifiedException(prescription.getPrescriptionId(),
+					nameOf(prescription.getStatus()));
+		}
+
+		order.setStatus(OrderStatus.APPROVED);
+		order.setUpdatedAt(Instant.now());
+		return this.repository.save(order);
+	}
+
+	@Override
+	public Order reject(Long orderId, String reason) {
+		Order order = pendingDecision(orderId);
+		order.setStatus(OrderStatus.REJECTED);
+		order.setRejectionReason(validateRejectionReason(reason));
+		order.setUpdatedAt(Instant.now());
+		return this.repository.save(order);
+	}
+
+	/**
+	 * Loads an order the client is allowed to decide on, and refuses one that has
+	 * already been decided.
+	 *
+	 * <p>Checking the status here rather than at each call site means approve and
+	 * reject cannot drift apart, and it is a 409 rather than a 400 because the
+	 * request was well formed: it simply no longer applies to this order.
+	 */
+	private Order pendingDecision(Long orderId) {
+		Order order = this.repository.findById(orderId).orElseThrow(() -> new OrderNotFoundException(orderId));
+		if (order.getStatus() != OrderStatus.PENDING_REVIEW) {
+			throw new OrderNotReviewableException(orderId, nameOf(order.getStatus()));
+		}
+		return order;
+	}
+
+	/**
+	 * The column allows 500 characters, and the check belongs here rather than only
+	 * in {@code @Size} on the request so a reason arriving from anywhere else is
+	 * held to the same rule. A rejection with no explanation is not something the
+	 * person told about it can act on.
+	 */
+	private static String validateRejectionReason(String reason) {
+		String trimmed = reason == null ? "" : reason.trim();
+		if (trimmed.isEmpty()) {
+			throw new InvalidOrderException("A rejection needs a reason", Map.of("reason", "is required"));
+		}
+		if (trimmed.length() > MAX_REJECTION_REASON) {
+			throw new InvalidOrderException("A rejection reason is too long",
+					Map.of("reason", "must be at most " + MAX_REJECTION_REASON + " characters"));
+		}
+		return trimmed;
+	}
+
+	/**
+	 * A row read back before it was written can still have a null enum, and the
+	 * messages here quote the status back to the client, so it must never become
+	 * the string "null".
+	 */
+	private static String nameOf(Enum<?> value) {
+		return value == null ? "in an unknown state" : value.name();
 	}
 
 	/**

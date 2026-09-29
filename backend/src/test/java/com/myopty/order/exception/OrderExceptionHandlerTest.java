@@ -204,6 +204,47 @@ class OrderExceptionHandlerTest {
 		assertThat(response.getBody().error().fieldErrors()).isNullOrEmpty();
 	}
 
+	/**
+	 * A conflict, not a bad request: the request was well formed, the prescription
+	 * simply has already been decided and reviewing is one-way, so no shape of
+	 * request would succeed. A 400 would invite a retry that can never work.
+	 */
+	@Test
+	void reportsAnAlreadyReviewedPrescriptionAsAConflict() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler
+			.handlePrescriptionNotReviewable(new PrescriptionNotReviewableException(12L, "REJECTED"));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("PRESCRIPTION_NOT_REVIEWABLE");
+	}
+
+	@Test
+	void reportsAnAlreadyDecidedOrderAsAConflict() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler
+			.handleOrderNotReviewable(new OrderNotReviewableException(3L, "APPROVED"));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("ORDER_NOT_REVIEWABLE");
+	}
+
+	/**
+	 * The message names the prescription and its real status, so a client can send
+	 * the reviewer to the prescription that still needs work rather than guessing
+	 * from the code alone.
+	 */
+	@Test
+	void namesThePrescriptionThatBlocksApproval() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler
+			.handlePrescriptionNotVerified(new PrescriptionNotVerifiedException(12L, "PENDING_REVIEW"));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("PRESCRIPTION_NOT_VERIFIED");
+		assertThat(response.getBody().error().message()).contains("12").contains("PENDING_REVIEW");
+	}
+
 	private static FieldError fieldError(String field, String message) {
 		return new FieldError("prescription", field, null, false, null, null, message);
 	}
