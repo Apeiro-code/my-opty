@@ -21,6 +21,7 @@ import com.myopty.order.domain.OrderType;
 import com.myopty.order.exception.InvalidOrderException;
 import com.myopty.order.exception.OrderAlreadyExistsException;
 import com.myopty.order.exception.OrderExceptionHandler;
+import com.myopty.order.exception.OrderNotAdvancableException;
 import com.myopty.order.exception.OrderNotFoundException;
 import com.myopty.order.exception.OrderNotReviewableException;
 import com.myopty.order.exception.PrescriptionNotFoundException;
@@ -382,6 +383,88 @@ class OrderControllerTest {
 		this.mockMvc.perform(get("/api/orders/abc"))
 			.andExpect(status().isBadRequest())
 			.andExpect(jsonPath("$.error.code").value("MALFORMED_REQUEST"));
+	}
+
+	@Test
+	void marksAnOrderAsProcessing() throws Exception {
+		when(this.service.markProcessing(3L)).thenReturn(orderIn(OrderStatus.PROCESSING));
+
+		this.mockMvc.perform(put("/api/orders/3/processing"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.status").value("PROCESSING"));
+	}
+
+	@Test
+	void marksAnOrderAsReady() throws Exception {
+		when(this.service.markReady(3L)).thenReturn(orderIn(OrderStatus.READY));
+
+		this.mockMvc.perform(put("/api/orders/3/ready"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.status").value("READY"));
+	}
+
+	@Test
+	void marksAnOrderAsDispatched() throws Exception {
+		when(this.service.markDispatched(3L)).thenReturn(orderIn(OrderStatus.DISPATCHED));
+
+		this.mockMvc.perform(put("/api/orders/3/dispatched"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.status").value("DISPATCHED"));
+	}
+
+	/**
+	 * Each endpoint names the state it moves to, so a request cannot push an order
+	 * somewhere the workflow has not reached: the three routes are the only way in.
+	 */
+	@Test
+	void refusesToProcessAnOrderStillAwaitingReview() throws Exception {
+		when(this.service.markProcessing(3L))
+			.thenThrow(new OrderNotAdvancableException(3L, "PENDING_REVIEW", OrderStatus.PROCESSING));
+
+		this.mockMvc.perform(put("/api/orders/3/processing"))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.error.code").value("ORDER_NOT_ADVANCABLE"))
+			.andExpect(jsonPath("$.error.message").value(org.hamcrest.Matchers.containsString("PROCESSING")));
+	}
+
+	@Test
+	void refusesToMoveADispatchedOrderAgain() throws Exception {
+		when(this.service.markReady(3L))
+			.thenThrow(new OrderNotAdvancableException(3L, "DISPATCHED", OrderStatus.READY));
+
+		this.mockMvc.perform(put("/api/orders/3/ready"))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.error.code").value("ORDER_NOT_ADVANCABLE"));
+	}
+
+	@Test
+	void reportsAnUnknownOrderWhenAdvancingIt() throws Exception {
+		when(this.service.markProcessing(3L)).thenThrow(new OrderNotFoundException(3L));
+
+		this.mockMvc.perform(put("/api/orders/3/processing"))
+			.andExpect(status().isNotFound())
+			.andExpect(jsonPath("$.error.code").value("ORDER_NOT_FOUND"));
+	}
+
+	/**
+	 * The production statuses are in the enum and the status column already, so the
+	 * queue endpoint can already ask for them. This is what a client would see while
+	 * working the bench.
+	 */
+	@Test
+	void queuesOrdersWaitingToBeProcessed() throws Exception {
+		when(this.service.listByStatus(OrderStatus.PROCESSING)).thenReturn(List.of(orderIn(OrderStatus.PROCESSING)));
+
+		this.mockMvc.perform(get("/api/orders").param("status", "PROCESSING"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.length()").value(1))
+			.andExpect(jsonPath("$.data[0].status").value("PROCESSING"));
+	}
+
+	private static Order orderIn(OrderStatus status) {
+		Order order = order();
+		order.setStatus(status);
+		return order;
 	}
 
 	private static Order order() {

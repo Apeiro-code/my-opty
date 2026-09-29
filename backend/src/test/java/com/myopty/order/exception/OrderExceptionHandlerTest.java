@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.Map;
 
+import com.myopty.order.domain.OrderStatus;
 import com.myopty.order.dto.ApiResponse;
 
 import org.junit.jupiter.api.Test;
@@ -245,8 +246,23 @@ class OrderExceptionHandlerTest {
 		assertThat(response.getBody().error().message()).contains("12").contains("PENDING_REVIEW");
 	}
 
-	private static FieldError fieldError(String field, String message) {
-		return new FieldError("prescription", field, null, false, null, null, message);
+	/**
+	 * A production step the order cannot make is a 409 rather than a 400: the request
+	 * is fine, it just does not apply to an order in this state. The message names
+	 * both ends of the refused move so a client knows which step to retry.
+	 */
+	@Test
+	void reportsAnOrderThatCannotMakeTheRequestedStep() {
+		ResponseEntity<ApiResponse<Void>> response = this.handler
+			.handleOrderNotAdvancable(new OrderNotAdvancableException(3L, "DISPATCHED", OrderStatus.READY));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().error().code()).isEqualTo("ORDER_NOT_ADVANCABLE");
+		assertThat(response.getBody().error().message()).contains("3").contains("DISPATCHED").contains("READY");
+	}
+
+	private static FieldError fieldError(String field, String message) {		return new FieldError("prescription", field, null, false, null, null, message);
 	}
 
 }
