@@ -15,8 +15,8 @@ public final class OrderMapper {
 
 	public static OrderResponse toResponse(Order order) {
 		return new OrderResponse(order.getOrderId(), order.getCustomerId(), order.getPrescriptionId(), order.getFrameId(),
-				order.getLensId(), nameOf(order.getOrderType()), nameOf(order.getStatus()), order.getReceiveDate(),
-				order.getCreatedAt(), order.getUpdatedAt());
+				order.getLensId(), nameOf(order.getOrderType()), nameOf(order.getStatus()), order.getRejectionReason(),
+				order.getReceiveDate(), order.getCreatedAt(), order.getUpdatedAt());
 	}
 
 	/**

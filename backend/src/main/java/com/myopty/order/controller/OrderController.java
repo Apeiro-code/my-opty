@@ -1,9 +1,15 @@
 package com.myopty.order.controller;
 
+import java.util.List;
+import java.util.Map;
+
 import com.myopty.order.domain.Order;
+import com.myopty.order.domain.OrderStatus;
 import com.myopty.order.dto.ApiResponse;
 import com.myopty.order.dto.OrderCreateRequest;
 import com.myopty.order.dto.OrderResponse;
+import com.myopty.order.dto.RejectionRequest;
+import com.myopty.order.exception.InvalidOrderException;
 import com.myopty.order.mapper.OrderMapper;
 import com.myopty.order.service.OrderService;
 
@@ -18,6 +24,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -76,18 +83,80 @@ public class OrderController {
 		return ApiResponse.ok(OrderMapper.toResponse(this.service.getById(orderId)));
 	}
 
-	@Operation(summary = "View the order built from a prescription",
-			description = "The other direction of the same link: given the prescription a customer already holds, "
-					+ "this is how they find the order that was made from it.")
+	@Operation(summary = "Search orders",
+			description = "One collection endpoint for both lookups, so every filter returns the same array shape. "
+					+ "At least one filter is required: an unfiltered list of every order ever placed is not a view "
+					+ "anybody asks for, and it would make the 100-row cap arbitrary. Supplying both narrows the "
+					+ "result to orders matching each. A prescription that has not been ordered gives an empty array "
+					+ "rather than a 404, because prescription_id is unique and the answer is genuinely 'none'.")
 	@ApiResponses({
-			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Order found"),
-			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404",
-					description = "Order not found, or that prescription has not been ordered") })
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+					description = "Matching orders, oldest first, at most 100"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400",
+					description = "No filter given, or a filter value that is not a valid order status") })
 	@GetMapping
-	public ApiResponse<OrderResponse> getByPrescriptionId(
-			@Parameter(description = "Prescription the order was built from", required = true) //
-			@RequestParam Long prescriptionId) {
-		return ApiResponse.ok(OrderMapper.toResponse(this.service.getByPrescriptionId(prescriptionId)));
+	public ApiResponse<List<OrderResponse>> search(
+			@Parameter(description = "Orders built from this prescription; at most one can match") //
+			@RequestParam(required = false) Long prescriptionId,
+			@Parameter(description = "Workflow status to queue by, e.g. PENDING_REVIEW for the approval queue") //
+			@RequestParam(required = false) OrderStatus status) {
+
+		if (prescriptionId == null && status == null) {
+			throw new InvalidOrderException("Search for orders by a prescription or a status",
+					Map.of("prescriptionId", "supply prescriptionId, status, or both"));
+		}
+
+		List<Order> found;
+		if (prescriptionId != null && status != null) {
+			found = this.service.getByPrescriptionId(prescriptionId).stream()
+				.filter(order -> order.getStatus() == status)
+				.toList();
+		}
+		else if (prescriptionId != null) {
+			found = this.service.getByPrescriptionId(prescriptionId);
+		}
+		else {
+			found = this.service.listByStatus(status);
+		}
+
+		return ApiResponse.ok(found.stream().map(OrderMapper::toResponse).toList());
+	}
+
+	@Operation(summary = "Approve an order for production",
+			description = "The client's accept decision. The order must still be PENDING_REVIEW and the prescription "
+					+ "it was built from must be VERIFIED, which is what stops an unreviewed or rejected prescription "
+					+ "reaching the lab. One-way: there is no un-approve, so a decision cannot be taken back by "
+					+ "resending the request.")
+	@ApiResponses({
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Order approved"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404",
+					description = "Order or its prescription not found"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409",
+					description = "The order has already been decided, or its prescription is not VERIFIED") })
+	@PutMapping("/{orderId}/approve")
+	public ApiResponse<OrderResponse> approve(
+			@Parameter(description = "Order id", required = true) @PathVariable Long orderId) {
+		return ApiResponse.ok(OrderMapper.toResponse(this.service.approve(orderId)));
+	}
+
+	@Operation(summary = "Reject an order",
+			description = "The client's turn-down decision, with the reason recorded against the order. Independent "
+					+ "of the prescription: rejecting an order does not reject the prescription it was built from, "
+					+ "because the order can be turned down for a reason that leaves the prescription valid. The order "
+					+ "does not have to have a verified prescription to be rejected.")
+	@ApiResponses({
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Order rejected"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400",
+					description = "The reason is missing or longer than 500 characters"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404", description = "Order not found"),
+			@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409",
+					description = "The order has already been decided") })
+	@PutMapping("/{orderId}/reject")
+	public ApiResponse<OrderResponse> reject(
+			@Parameter(description = "Order id", required = true) @PathVariable Long orderId,
+			@Parameter(description = "Why the order is being rejected", required = true) //
+			@Valid @RequestBody RejectionRequest request) {
+		return ApiResponse.ok(OrderMapper.toResponse(this.service.reject(orderId, request.reason())));
 	}
 
 }

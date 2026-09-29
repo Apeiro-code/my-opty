@@ -70,23 +70,29 @@ POST   /api/inventory/report/export   # Export PDF/Excel
 
 **Key Features:**
 - Prescription form with all optical fields + document upload
-- Progressive order workflow: PENDING → APPROVED → PROCESSING → READY → DISPATCHED
-- Client review/approve/reject prescriptions
+- Progressive order workflow: PENDING → APPROVED → PROCESSING → READY → DISPATCHED, or REJECTED
+- Client review/approve/reject prescriptions, and approve/reject progressive orders
 - Estimated receive date calculation (based on lens type, stock, lab time)
 - Discount engine: create/edit/end rules, bulk apply, history log
 - New stock intake: record quantity, cost, supplier, auto-increment stock
 - Customer notifications on status changes
 
-**API Endpoints (Planned):**
+**API Endpoints:**
+Prescription and order endpoints are implemented. The rest are still planned.
+
 ```
 POST   /api/prescriptions                  # Submit prescription (customer)
 GET    /api/prescriptions/{id}             # View prescription
-PUT    /api/prescriptions/{id}/verify      # Client verify/reject
-POST   /api/orders/progressive             # Create progressive order
-GET    /api/orders/progressive             # List (client: all; customer: own)
-GET    /api/orders/progressive/{id}        # Detail
-PUT    /api/orders/progressive/{id}/status # Update status (client)
-GET    /api/orders/progressive/{id}/receive-date # Estimated date
+GET    /api/prescriptions/{id}/document    # Download uploaded document (client)
+GET    /api/prescriptions?status=          # Review queue (client), e.g. PENDING_REVIEW
+PUT    /api/prescriptions/{id}/verify      # Client verify
+PUT    /api/prescriptions/{id}/reject      # Client reject, body: { "reason": "..." }
+POST   /api/orders                         # Create order against a prescription
+GET    /api/orders/{id}                    # Order detail
+GET    /api/orders?prescriptionId=         # Order built from a prescription
+GET    /api/orders?status=                 # Approval queue (client)
+PUT    /api/orders/{id}/approve            # Client approve
+PUT    /api/orders/{id}/reject             # Client reject, body: { "reason": "..." }
 POST   /api/discounts                      # Create discount (client)
 GET    /api/discounts                      # List (with active filter)
 PUT    /api/discounts/{id}                 # Update discount
@@ -94,6 +100,19 @@ DELETE /api/discounts/{id}                 # End early
 POST   /api/stock/updates                  # Record new stock (client)
 GET    /api/stock/updates                  # History
 ```
+
+Notes on the implemented endpoints:
+
+- The order endpoints are mounted at `/api/orders` rather than the originally
+  planned `/api/orders/progressive`, because the order type is something the
+  customer selects and a path segment would fix the value the URL left open.
+- `GET /api/orders` requires at least one of `prescriptionId` or `status`, and
+  always returns an array. Queue endpoints return at most 100 rows, oldest first.
+- An order can only be approved once its prescription is `VERIFIED`, so nothing
+  unreviewed reaches production. Reviewing is one-way: there is no re-review.
+- **These review and approval endpoints are not yet authenticated.** The module has
+  no authentication or roles yet, so anyone who can reach the API can approve or
+  reject production work. Auth belongs to the shared module; see CONTRIBUTION.md.
 
 **Database Tables:** `prescription`, `progressive_order`, `discount`, `stock_update`
 

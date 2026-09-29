@@ -12,9 +12,11 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  * payload reads the same as the {@code status} of a prescription and matches the
  * values the migration's check constraints allow. {@code receiveDate} is omitted
  * until the shop has quoted one, because a guess is worse than an absence.
+ * {@code rejectionReason} is omitted the same way, and is present only once the
+ * shop has rejected the order.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record OrderResponse(Long id, Long customerId, Long prescriptionId, Long frameId, Long lensId, String orderType,
-		String status, LocalDate receiveDate, Instant createdAt, Instant updatedAt) {
+		String status, String rejectionReason, LocalDate receiveDate, Instant createdAt, Instant updatedAt) {
 
 }
