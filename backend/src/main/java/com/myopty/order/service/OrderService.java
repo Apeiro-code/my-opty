@@ -86,6 +86,36 @@ public interface OrderService {
 	Order reject(Long orderId, String reason);
 
 	/**
+	 * Records that the order is being made in the lab.
+	 *
+	 * <p>One of the three production steps. Which of them are legal from the
+	 * order's current status is decided by {@link OrderStatus#canAdvanceTo}, not by
+	 * this method, so the three cannot disagree about the workflow between them.
+	 *
+	 * <p>The prescription is not read again: the order was already accepted against
+	 * a verified one and that decision is one-way.
+	 *
+	 * @throws com.myopty.order.exception.OrderNotFoundException       if no such order exists
+	 * @throws com.myopty.order.exception.OrderNotAdvancableException if the order cannot be moved to PROCESSING from where it is
+	 */
+	Order markProcessing(Long orderId);
+
+	/**
+	 * Records that the order is finished and waiting for the customer to collect.
+	 *
+	 * @throws com.myopty.order.exception.OrderNotFoundException       if no such order exists
+	 * @throws com.myopty.order.exception.OrderNotAdvancableException if the order cannot be moved to READY from where it is
+	 */
+	Order markReady(Long orderId);
+
+	/**
+	 * Records that the order has been handed over or sent to the customer. This is
+	 * the last step, and no order moves on from it.
+	 *
+	 * @throws com.myopty.order.exception.OrderNotFoundException       if no such order exists
+	 * @throws com.myopty.order.exception.OrderNotAdvancableException if the order cannot be moved to DISPATCHED from where it is
+	 */
+	Order markDispatched(Long orderId);
 	 * Corrects the estimated receive date, or withdraws it.
 	 *
 	 * <p>The estimate quoted on approval is worked out from a configured lead time,

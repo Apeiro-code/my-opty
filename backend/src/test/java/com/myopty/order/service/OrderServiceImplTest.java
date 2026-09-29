@@ -24,6 +24,7 @@ import com.myopty.order.domain.PrescriptionStatus;
 import com.myopty.order.dto.OrderCreateRequest;
 import com.myopty.order.exception.InvalidOrderException;
 import com.myopty.order.exception.OrderAlreadyExistsException;
+import com.myopty.order.exception.OrderNotAdvancableException;
 import com.myopty.order.exception.OrderNotApprovedException;
 import com.myopty.order.exception.OrderNotFoundException;
 import com.myopty.order.exception.OrderNotReviewableException;
@@ -495,6 +496,107 @@ class OrderServiceImplTest {
 		assertThat(this.service.listByStatus(OrderStatus.PENDING_REVIEW)).containsExactly(first);
 	}
 
+	@Test
+	void reportsAnUnknownOrderWhenAdvancingIt() {
+		when(this.repository.findById(ORDER_ID)).thenReturn(Optional.empty());
+
+		assertThatThrownBy(() -> this.service.markProcessing(ORDER_ID)).isInstanceOf(OrderNotFoundException.class);
+	}
+
+	@Test
+	void marksAnApprovedOrderAsProcessing() {
+		stubOrder(orderIn(OrderStatus.APPROVED));
+		stubSaveEchoingTheId();
+
+		Order moved = this.service.markProcessing(ORDER_ID);
+
+		assertThat(moved.getStatus()).isEqualTo(OrderStatus.PROCESSING);
+	}
+
+	@Test
+	void marksAnOrderAsReady() {
+		stubOrder(orderIn(OrderStatus.PROCESSING));
+		stubSaveEchoingTheId();
+
+		Order moved = this.service.markReady(ORDER_ID);
+
+		assertThat(moved.getStatus()).isEqualTo(OrderStatus.READY);
+	}
+
+	@Test
+	void marksAnOrderAsDispatched() {
+		stubOrder(orderIn(OrderStatus.READY));
+		stubSaveEchoingTheId();
+
+		Order moved = this.service.markDispatched(ORDER_ID);
+
+		assertThat(moved.getStatus()).isEqualTo(OrderStatus.DISPATCHED);
+	}
+
+	/**
+	 * A frame that was already in stock has not been through the lab, and making the
+	 * client record a processing step that never happened would be a worse record
+	 * than the skip.
+	 */
+	@Test
+	void letsAnApprovedOrderSkipStraightToDispatched() {
+		stubOrder(orderIn(OrderStatus.APPROVED));
+		stubSaveEchoingTheId();
+
+		Order moved = this.service.markDispatched(ORDER_ID);
+
+		assertThat(moved.getStatus()).isEqualTo(OrderStatus.DISPATCHED);
+	}
+
+	/**
+	 * The reason the review decision and the production steps are separate: work must
+	 * never start on an order the shop has not accepted.
+	 */
+	@Test
+	void refusesToProcessAnOrderStillAwaitingReview() {
+		stubOrder(orderIn(OrderStatus.PENDING_REVIEW));
+
+		assertThatThrownBy(() -> this.service.markProcessing(ORDER_ID))
+			.isInstanceOf(OrderNotAdvancableException.class)
+			.hasMessageContaining("PENDING_REVIEW")
+			.hasMessageContaining("PROCESSING");
+
+		verify(this.repository, never()).save(any(Order.class));
+	}
+
+	@Test
+	void neverMovesAnOrderBackwards() {
+		stubOrder(orderIn(OrderStatus.READY));
+
+		assertThatThrownBy(() -> this.service.markProcessing(ORDER_ID))
+			.isInstanceOf(OrderNotAdvancableException.class)
+			.hasMessageContaining("READY");
+	}
+
+	@Test
+	void neverMovesADispatchedOrderAgain() {
+		stubOrder(orderIn(OrderStatus.DISPATCHED));
+
+		assertThatThrownBy(() -> this.service.markReady(ORDER_ID))
+			.isInstanceOf(OrderNotAdvancableException.class)
+			.hasMessageContaining("DISPATCHED");
+
+		verify(this.repository, never()).save(any(Order.class));
+	}
+
+	/**
+	 * A rejected order never entered production, so no step applies to it however
+	 * many times a client tries.
+	 */
+	@Test
+	void neverMovesARejectedOrderIntoProduction() {
+		stubOrder(orderIn(OrderStatus.REJECTED));
+
+		for (Runnable attempt : List.<Runnable>of(() -> this.service.markProcessing(ORDER_ID),
+				() -> this.service.markReady(ORDER_ID), () -> this.service.markDispatched(ORDER_ID))) {
+			assertThatThrownBy(attempt::run).isInstanceOf(OrderNotAdvancableException.class)
+				.hasMessageContaining("REJECTED");
+		}
 	/**
 	 * The date the estimate produces is checked against the frozen clock rather than
 	 * "about two weeks out", so a change to the lead time or the rule shows up here
@@ -624,6 +726,24 @@ class OrderServiceImplTest {
 		verify(this.repository, never()).save(any(Order.class));
 	}
 
+	/**
+	 * The order was already accepted against a verified prescription, and that
+	 * decision cannot be taken back, so advancing reads the order and nothing else.
+	 */
+	@Test
+	void advancesWithoutReadingThePrescriptionAgain() {
+		stubOrder(orderIn(OrderStatus.APPROVED));
+		stubSaveEchoingTheId();
+
+		this.service.markProcessing(ORDER_ID);
+
+		verify(this.prescriptions, never()).findById(any());
+	}
+
+	private static Order orderIn(OrderStatus status) {
+		Order order = pendingOrder();
+		order.setStatus(status);
+		return order;
 	@Test
 	void refusesAReceiveDateOnARejectedOrder() {
 		Order rejected = approvedOrder();
