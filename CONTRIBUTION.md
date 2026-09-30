@@ -211,11 +211,40 @@ V4__workflow_create_todo_task_table.sql
 V5__billing_create_payment_table.sql
 V6__shared_create_app_user_table.sql
 V7__catalog_add_frame_image_url.sql
+V8__order_create_progressive_order_table.sql
+V9__order_add_order_rejection.sql
+V10__order_create_notification_table.sql
 ```
+
+### Applied Version Map
+Check this before creating a migration. The versions above are the agreed
+allocations; this is which of them have actually landed.
+
+| Version | Module | File | Status |
+|---------|--------|------|--------|
+| V2 | catalog | `V2__catalog_create_frame_table.sql` | allocated, not applied |
+| V3 | order | `V3__order_create_prescription_table.sql` | applied |
+| V4 | workflow | `V4__workflow_create_todo_task_table.sql` | allocated, not applied |
+| V5 | billing | `V5__billing_create_payment_table.sql` | allocated, not applied |
+| V6 | shared | `V6__shared_create_app_user_table.sql` | allocated, not applied |
+| V7 | catalog | `V7__catalog_add_frame_image_url.sql` | allocated, not applied |
+| V8 | order | `V8__order_create_progressive_order_table.sql` | applied (PR #3) |
+| V9 | order | `V9__order_add_order_rejection.sql` | applied (PR #4) |
+| V10 | order | `V10__order_create_notification_table.sql` | pending merge (PR #8) |
+
+**V11 is the next free version.** Catalog is the module most likely to claim it, so
+check team chat before taking it.
+
+V10 is listed as pending rather than applied on purpose: a migration that has been
+written, reviewed and merged has still not been run against a real database, and
+this table records what has actually happened to one. It also still has to be
+announced in team chat before it is applied anywhere, as the rule above requires.
 
 ### Migration Version Coordination
 - Use sequential versions across modules (check latest V number before creating)
 - Announce new migrations in team chat before applying
+- A version listed in the allocated examples above but not in the applied table is
+  still free for its owner, so do not skip past it
 
 ---
 

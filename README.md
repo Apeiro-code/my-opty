@@ -70,23 +70,35 @@ POST   /api/inventory/report/export   # Export PDF/Excel
 
 **Key Features:**
 - Prescription form with all optical fields + document upload
-- Progressive order workflow: PENDING → APPROVED → PROCESSING → READY → DISPATCHED
-- Client review/approve/reject prescriptions
+- Progressive order workflow: PENDING → APPROVED → PROCESSING → READY → DISPATCHED, or REJECTED
+- Client review/approve/reject prescriptions, and approve/reject progressive orders
 - Estimated receive date calculation (based on lens type, stock, lab time)
 - Discount engine: create/edit/end rules, bulk apply, history log
 - New stock intake: record quantity, cost, supplier, auto-increment stock
 - Customer notifications on status changes
 
-**API Endpoints (Planned):**
+**API Endpoints:**
+Prescription and order endpoints are implemented. The rest are still planned.
+
 ```
 POST   /api/prescriptions                  # Submit prescription (customer)
 GET    /api/prescriptions/{id}             # View prescription
-PUT    /api/prescriptions/{id}/verify      # Client verify/reject
-POST   /api/orders/progressive             # Create progressive order
-GET    /api/orders/progressive             # List (client: all; customer: own)
-GET    /api/orders/progressive/{id}        # Detail
-PUT    /api/orders/progressive/{id}/status # Update status (client)
-GET    /api/orders/progressive/{id}/receive-date # Estimated date
+GET    /api/prescriptions/{id}/document    # Download uploaded document (client)
+GET    /api/prescriptions?status=          # Review queue (client), e.g. PENDING_REVIEW
+PUT    /api/prescriptions/{id}/verify      # Client verify
+PUT    /api/prescriptions/{id}/reject      # Client reject, body: { "reason": "..." }
+POST   /api/orders                         # Create order against a prescription
+GET    /api/orders/{id}                    # Order detail
+GET    /api/orders?prescriptionId=         # Order built from a prescription
+GET    /api/orders?status=                 # Approval queue (client)
+PUT    /api/orders/{id}/approve            # Client approve
+PUT    /api/orders/{id}/reject             # Client reject, body: { "reason": "..." }
+PUT    /api/orders/{id}/receive-date       # Set or withdraw the estimate, body: { "receiveDate": "YYYY-MM-DD" }
+PUT    /api/orders/{id}/processing         # Client: now in the lab
+PUT    /api/orders/{id}/ready              # Client: ready to collect
+PUT    /api/orders/{id}/dispatched         # Client: handed over or sent
+GET    /api/notifications?customerId=       # What the shop told a customer, newest first
+GET    /api/notifications?orderId=          # One order's notification history
 POST   /api/discounts                      # Create discount (client)
 GET    /api/discounts                      # List (with active filter)
 PUT    /api/discounts/{id}                 # Update discount
@@ -95,7 +107,41 @@ POST   /api/stock/updates                  # Record new stock (client)
 GET    /api/stock/updates                  # History
 ```
 
-**Database Tables:** `prescription`, `progressive_order`, `discount`, `stock_update`
+Notes on the implemented endpoints:
+
+- The order endpoints are mounted at `/api/orders` rather than the originally
+  planned `/api/orders/progressive`, because the order type is something the
+  customer selects and a path segment would fix the value the URL left open.
+- `GET /api/orders` requires at least one of `prescriptionId` or `status`, and
+  always returns an array. Queue endpoints return at most 100 rows, oldest first.
+- An order can only be approved once its prescription is `VERIFIED`, so nothing
+  unreviewed reaches production. Reviewing is one-way: there is no re-review.
+- Approving quotes an estimated receive date from the lab lead time configured for
+  that order type (`myopty.lab.lead-days`). The client can correct it, since only
+  the shop knows its real queue. Stock is not part of the calculation until the
+  catalog module's frame table (V2) exists.
+- The client moves an approved order along with `/processing`, `/ready` and
+  `/dispatched`. The workflow is forward-only and a step may be skipped (a frame
+  already in stock never gets processed); `DISPATCHED` and `REJECTED` are terminal.
+  A generic "set status" endpoint is deliberately absent, so a client cannot name a
+  state the workflow has not reached.
+- Every status change writes a notification recording the move, and the customer
+  is told through a pluggable `NotificationSender`. The only implementation logs it,
+  because sending mail needs a provider the shared module has not got yet; a real
+  transport replaces the log one by declaring its own bean. The message is stored
+  as it was written, so rewording the templates never changes what past
+  notifications claim was said.
+- `GET /api/notifications` needs `customerId` or `orderId`, and `orderId` wins if
+  both are sent. It returns at most 100 rows, newest first.
+- **These review and approval endpoints are not yet authenticated.** The module has
+  no authentication or roles yet, so anyone who can reach the API can approve or
+  reject production work. Auth belongs to the shared module; see CONTRIBUTION.md.
+- **`GET /api/notifications` is the sharpest edge of that.** Without auth there is
+  no way to tell who is asking, so supplying any `customerId` returns that
+  customer's order history to anyone who asks. Requiring a filter stops the
+  unbounded read but is not a substitute for authentication.
+
+**Database Tables:** `prescription`, `progressive_order`, `order_notification`, `discount`, `stock_update`
 
 ---
 
@@ -248,6 +294,16 @@ GET    /api/questions/faq                # Public FAQ
 
 ## Development Workflow
 
+### Branching Strategy
+
+`main` is the source of truth and is kept stable (shippable) at all times.
+
+- **Never** commit directly to `main`.
+- All work happens on short-lived **feature branches** created from `main`.
+- Each branch fixes `main` back to a single Pull Request; release happens from `main`.
+- **Branch lifecycle:** create from `main` → work + commit → open PR → review (≥1 approval, and the module owner must approve changes to their module) → CI green → squash-merge → **delete the branch**.
+- Full review rules: see [CONTRIBUTION.md](CONTRIBUTION.md).
+
 ### Branch Naming
 ```
 <type>/<module>-<short-description>
@@ -274,6 +330,25 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 - Each module owns its tables → creates its own Flyway migration files
 - Naming: `V<version>__<module>_<description>.sql`
 - Example: `V2__catalog_create_frame_table.sql`
+
+---
+
+## Repository Structure
+
+```
+my-opty/
+├── backend/         # Spring Boot API (Java 26, Maven Wrapper)
+│   ├── compose.yaml # Local MySQL via Docker Compose
+│   ├── src/         # Java code + Flyway migrations
+│   └── pom.xml
+├── frontend/        # Next.js 16 web app (TypeScript, Tailwind CSS)
+│   └── app/         # Next.js app router pages
+├── database/        # DB-wide artifacts (ERD sources, data dictionary, migration notes)
+├── docs/            # Project documentation (deployment plan, API specs)
+├── items.json       # Epic/user-story board export (GitHub Projects)
+├── CONTRIBUTION.md  # Contribution, branch & PR conventions
+└── README.md        # Project plan, epics, user stories, diagrams
+```
 
 ---
 
